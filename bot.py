@@ -19,30 +19,41 @@ telegram_app = Application.builder().token(TOKEN).build()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔎 ConsultaBot V3 REAL Online\n\n"
-        "Envie nome completo da pessoa para pesquisar processos."
+        "Use:\n"
+        "/buscar Nome Completo\n\n"
+        "Ou envie apenas o nome da pessoa."
     )
 
 
 # CONSULTA
 async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nome = update.message.text.strip()
+    try:
+        if context.args:
+            nome = " ".join(context.args).strip()
+        else:
+            nome = update.message.text.strip()
 
-    msg = await update.message.reply_text("🔍 Consultando processos...")
+        if nome.lower() == "/buscar":
+            await update.message.reply_text("Digite assim:\n/buscar João Silva")
+            return
 
-    resultado = await buscar_processos(nome)
+        msg = await update.message.reply_text("🔍 Consultando processos...")
 
-    await msg.edit_text(resultado)
+        resultado = await buscar_processos(nome)
+
+        await msg.edit_text(resultado)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro: {str(e)}")
 
 
 # PLAYWRIGHT
 async def buscar_processos(nome):
     try:
-        resultados = []
-
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox"]
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
 
             page = await browser.new_page()
@@ -53,35 +64,47 @@ async def buscar_processos(nome):
 
             await page.goto(url, timeout=30000)
 
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(5000)
 
             texto = await page.content()
 
             await browser.close()
 
-        numeros = re.findall(r'\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}', texto)
+        numeros = re.findall(
+            r'\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}',
+            texto
+        )
 
-        tribunais = re.findall(r'TJRS|TJSP|TJMG|TRF4|TRF1|TRF3|TRT', texto)
+        tribunais = re.findall(
+            r'TJRS|TJSP|TJMG|TJRJ|TRF1|TRF3|TRF4|TRT',
+            texto
+        )
 
         if not numeros:
-            return "❌ Nenhum processo encontrado."
+            return f"❌ Nenhum processo encontrado para {nome}."
 
         resposta = f"🔎 Resultados para {nome}\n\n"
 
         usados = set()
+        contador = 1
 
-        for i, proc in enumerate(numeros[:10], start=1):
+        for i, proc in enumerate(numeros):
             if proc in usados:
                 continue
 
             usados.add(proc)
 
-            tribunal = tribunais[i-1] if len(tribunais) >= i else "Não informado"
+            tribunal = tribunais[i] if i < len(tribunais) else "Não informado"
 
             resposta += (
-                f"{i}️⃣ Processo: {proc}\n"
+                f"{contador}️⃣ Processo: {proc}\n"
                 f"🏛 Tribunal: {tribunal}\n\n"
             )
+
+            contador += 1
+
+            if contador > 10:
+                break
 
         return resposta
 
@@ -89,7 +112,7 @@ async def buscar_processos(nome):
         return f"❌ Erro na consulta: {str(e)}"
 
 
-# TELEGRAM ROUTE
+# WEBHOOK TELEGRAM
 @app.post("/")
 async def webhook(req: Request):
     data = await req.json()
@@ -98,6 +121,7 @@ async def webhook(req: Request):
     return {"ok": True}
 
 
+# HOME
 @app.get("/")
 async def home():
     return {"status": "ConsultaBot V3 REAL online"}
@@ -107,6 +131,7 @@ async def home():
 @app.on_event("startup")
 async def startup():
     telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("buscar", consultar))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consultar))
 
     await telegram_app.initialize()
@@ -114,6 +139,7 @@ async def startup():
     await telegram_app.bot.set_webhook(url=RENDER_URL)
 
 
+# SHUTDOWN
 @app.on_event("shutdown")
 async def shutdown():
     await telegram_app.shutdown()
