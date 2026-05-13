@@ -5,13 +5,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 from consulta import buscar_processos_nome, ordenar_por_data
 
-
-# =========================
-# CONFIG
-# =========================
-TOKEN = os.getenv("TOKEN")
-RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
-
 app = FastAPI()
 
 telegram_app = None
@@ -27,57 +20,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nome_busca = " ".join(context.args)
 
-    if not nome_busca:
-        await update.message.reply_text("Digite um nome. Ex: /buscar João Silva")
-        return
-
     processos = buscar_processos_nome(nome_busca)
     processos = ordenar_por_data(processos)
 
-    if not processos:
-        await update.message.reply_text("Nenhum processo encontrado.")
-        return
-
-    resposta = f"🔎 Processos de: {nome_busca}\n\n"
+    resposta = f"🔎 {nome_busca}\n\n"
 
     for p in processos[:10]:
-        resposta += (
-            f"📁 Processo: {p.get('numero')}\n"
-            f"🏛 Tribunal: {p.get('tribunal')}\n"
-            f"⚖ Classe: {p.get('classe')}\n"
-            f"📌 Assunto: {p.get('assunto')}\n"
-            f"📅 Data: {p.get('dataAjuizamento') or 'Não informada'}\n"
-            f"------------------------\n"
-        )
-
-    await update.message.reply_text(resposta[:4000])
-
-
-async def nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nome_busca = " ".join(context.args)
-
-    if not nome_busca:
-        await update.message.reply_text("Digite um nome. Ex: /nome João Silva")
-        return
-
-    processos = buscar_processos_nome(nome_busca)
-    processos = ordenar_por_data(processos)
-
-    if not processos:
-        await update.message.reply_text("Nenhum processo encontrado.")
-        return
-
-    resposta = f"🔎 Processos de: {nome_busca}\n\n"
-
-    for p in processos[:10]:
-        resposta += (
-            f"📁 Processo: {p.get('numero')}\n"
-            f"🏛 Tribunal: {p.get('tribunal')}\n"
-            f"⚖ Classe: {p.get('classe')}\n"
-            f"📌 Assunto: {p.get('assunto')}\n"
-            f"📅 Data: {p.get('dataAjuizamento') or 'Não informada'}\n"
-            f"------------------------\n"
-        )
+        resposta += f"{p.get('numero')} - {p.get('assunto')}\n"
 
     await update.message.reply_text(resposta[:4000])
 
@@ -93,46 +42,45 @@ async def webhook(req: Request):
     return {"ok": True}
 
 
-# =========================
-# HOME
-# =========================
 @app.get("/")
 def home():
-    return {"status": "ConsultaBot Brasil online"}
+    return {"status": "ok"}
 
 
 # =========================
-# STARTUP (CORRIGIDO E SEGURO)
+# STARTUP (ABSOLUTAMENTE SEGURO)
 # =========================
 @app.on_event("startup")
 async def startup():
     global telegram_app
 
     try:
-        if not TOKEN:
-            print("❌ TOKEN não definido no Render")
-            return
+        token = os.getenv("TOKEN")
+        url = os.getenv("RENDER_URL", "").rstrip("/")
 
-        if not RENDER_URL:
-            print("❌ RENDER_URL não definido no Render")
-            return
+        print("TOKEN:", bool(token))
+        print("URL:", url)
 
-        telegram_app = ApplicationBuilder().token(TOKEN).build()
+        if not token:
+            raise Exception("TOKEN não definido")
+
+        if not url:
+            raise Exception("RENDER_URL não definido")
+
+        telegram_app = ApplicationBuilder().token(token).build()
 
         telegram_app.add_handler(CommandHandler("start", start))
         telegram_app.add_handler(CommandHandler("buscar", buscar))
-        telegram_app.add_handler(CommandHandler("nome", nome))
 
         await telegram_app.initialize()
 
-        webhook_url = f"{RENDER_URL}/webhook"
-
         await telegram_app.bot.set_webhook(
-            url=webhook_url,
+            url=f"{url}/webhook",
             drop_pending_updates=True
         )
 
-        print("✅ BOT ONLINE COM SUCESSO")
+        print("BOT ONLINE")
 
     except Exception as e:
-        print("❌ ERRO NO STARTUP:", str(e))
+        print("🔥 ERRO REAL NO STARTUP:", str(e))
+        raise
