@@ -1,126 +1,55 @@
 import os
-import re
 import requests
 from fastapi import FastAPI, Request
-from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
 RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 app = FastAPI()
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-
 # =========================
-# FUNÇÕES
+# CONSULTA SERPAPI
 # =========================
-def limpar(txt):
-    return re.sub(r"\s+", " ", txt).strip()
-
-def numero_processo(txt):
-    padrao = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
-    achou = re.findall(padrao, txt)
-    return achou[0] if achou else "Não localizado"
-
-def tribunal(txt):
-    lista = [
-        "TJSP","TJRJ","TJMG","TJRS","TJPR","TJSC","TJBA","TJCE",
-        "TRF1","TRF2","TRF3","TRF4","TRF5","STJ","STF","TST"
-    ]
-    for x in lista:
-        if x.lower() in txt.lower():
-            return x
-    return "Não identificado"
-
-def assunto(txt):
-    lista = [
-        "indenização","cobrança","trabalhista","divórcio",
-        "aposentadoria","benefício","criminal","execução",
-        "tributário","civil","consumidor","previdenciário"
-    ]
-    for x in lista:
-        if x.lower() in txt.lower():
-            return x.title()
-    return "Não informado"
-
-# =========================
-# GOOGLE
-# =========================
-def buscar_google(nome):
-    dados = []
-
-    try:
-        url = f"https://www.google.com/search?q={nome}+processo+jusbrasil"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        for item in soup.select("div.g")[:10]:
-            texto = limpar(item.get_text(" ", strip=True))
-
-            dados.append({
-                "numero": numero_processo(texto),
-                "tribunal": tribunal(texto),
-                "assunto": assunto(texto),
-                "fonte": "Google"
-            })
-    except:
-        pass
-
-    return dados
-
-# =========================
-# DUCKDUCKGO
-# =========================
-def buscar_duck(nome):
-    dados = []
-
-    try:
-        url = f"https://duckduckgo.com/html/?q={nome}+processo"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        for item in soup.select(".result")[:10]:
-            texto = limpar(item.get_text(" ", strip=True))
-
-            dados.append({
-                "numero": numero_processo(texto),
-                "tribunal": tribunal(texto),
-                "assunto": assunto(texto),
-                "fonte": "DuckDuckGo"
-            })
-    except:
-        pass
-
-    return dados
-
 def buscar_processos(nome):
-    lista = buscar_google(nome) + buscar_duck(nome)
+    url = "https://serpapi.com/search.json"
 
-    unicos = []
-    vistos = set()
+    params = {
+        "engine": "google",
+        "q": f'"{nome}" processo jusbrasil',
+        "hl": "pt-br",
+        "gl": "br",
+        "api_key": SERPAPI_KEY
+    }
 
-    for item in lista:
-        chave = item["numero"] + item["tribunal"]
-        if chave not in vistos:
-            vistos.add(chave)
-            unicos.append(item)
+    try:
+        r = requests.get(url, params=params, timeout=20)
+        data = r.json()
 
-    return unicos[:10]
+        resultados = []
+
+        for item in data.get("organic_results", [])[:10]:
+            resultados.append({
+                "titulo": item.get("title", "Sem título"),
+                "link": item.get("link", ""),
+                "snippet": item.get("snippet", "")
+            })
+
+        return resultados
+
+    except:
+        return []
 
 # =========================
 # COMANDOS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🇧🇷 ConsultaBot Brasil Online\n\n"
+        "🇧🇷 ConsultaBot Brasil PRO Online\n\n"
         "Use:\n"
         "/buscar Nome Sobrenome"
     )
@@ -129,26 +58,24 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nome = " ".join(context.args).strip()
 
     if not nome:
-        await update.message.reply_text("Digite um nome.\nEx: /buscar João Silva")
+        await update.message.reply_text("Digite um nome.")
         return
 
-    await update.message.reply_text(f"🔎 Consulta: {nome}")
+    await update.message.reply_text(f"🔎 Consultando {nome}...")
 
-    resultados = buscar_processos(nome)
+    dados = buscar_processos(nome)
 
-    if not resultados:
-        await update.message.reply_text("❌ Nenhum processo encontrado.")
+    if not dados:
+        await update.message.reply_text("❌ Nenhum processo localizado.")
         return
 
     msg = f"🔎 Resultados para {nome}\n\n"
 
-    for i, p in enumerate(resultados, 1):
+    for i, item in enumerate(dados, 1):
         msg += (
-            f"{i}. 📁 Processo: {p['numero']}\n"
-            f"🏛 Tribunal: {p['tribunal']}\n"
-            f"⚖ Assunto: {p['assunto']}\n"
-            f"🌐 Fonte: {p['fonte']}\n"
-            f"------------------\n"
+            f"{i}. 📁 {item['titulo']}\n"
+            f"📝 {item['snippet']}\n"
+            f"🌐 {item['link']}\n\n"
         )
 
     await update.message.reply_text(msg[:4000])
@@ -179,9 +106,6 @@ async def webhook(req: Request):
     await telegram_app.process_update(update)
     return {"ok": True}
 
-# =========================
-# HOME
-# =========================
 @app.get("/")
 def home():
-    return {"status": "ConsultaBot Brasil online"}
+    return {"status": "ConsultaBot PRO online"}
