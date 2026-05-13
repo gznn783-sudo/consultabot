@@ -3,11 +3,21 @@ from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-from consulta import buscar_processos_nome, ordenar_por_data
+# =========================
+# CONFIG
+# =========================
+TOKEN = os.getenv("TOKEN")
+RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
+
+if not TOKEN:
+    raise Exception("TOKEN não definido no Render")
+
+if not RENDER_URL:
+    raise Exception("RENDER_URL não definido no Render")
 
 app = FastAPI()
 
-telegram_app = None
+telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 
 # =========================
@@ -18,17 +28,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nome_busca = " ".join(context.args)
+    nome = " ".join(context.args)
 
-    processos = buscar_processos_nome(nome_busca)
-    processos = ordenar_por_data(processos)
+    if not nome:
+        await update.message.reply_text("Use: /buscar nome")
+        return
 
-    resposta = f"🔎 {nome_busca}\n\n"
+    await update.message.reply_text(f"🔎 Consulta: {nome}")
 
-    for p in processos[:10]:
-        resposta += f"{p.get('numero')} - {p.get('assunto')}\n"
 
-    await update.message.reply_text(resposta[:4000])
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("buscar", buscar))
+
+
+# =========================
+# STARTUP (WEBHOOK)
+# =========================
+@app.on_event("startup")
+async def startup():
+    await telegram_app.initialize()
+
+    webhook_url = f"{RENDER_URL}/webhook"
+
+    await telegram_app.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True
+    )
+
+    print("✅ Bot rodando com webhook:", webhook_url)
 
 
 # =========================
@@ -37,50 +64,16 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
+
     update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
+
     return {"ok": True}
 
 
+# =========================
+# HEALTH CHECK
+# =========================
 @app.get("/")
 def home():
-    return {"status": "ok"}
-
-
-# =========================
-# STARTUP (ABSOLUTAMENTE SEGURO)
-# =========================
-@app.on_event("startup")
-async def startup():
-    global telegram_app
-
-    try:
-        token = os.getenv("TOKEN")
-        url = os.getenv("RENDER_URL", "").rstrip("/")
-
-        print("TOKEN:", bool(token))
-        print("URL:", url)
-
-        if not token:
-            raise Exception("TOKEN não definido")
-
-        if not url:
-            raise Exception("RENDER_URL não definido")
-
-        telegram_app = ApplicationBuilder().token(token).build()
-
-        telegram_app.add_handler(CommandHandler("start", start))
-        telegram_app.add_handler(CommandHandler("buscar", buscar))
-
-        await telegram_app.initialize()
-
-        await telegram_app.bot.set_webhook(
-            url=f"{url}/webhook",
-            drop_pending_updates=True
-        )
-
-        print("BOT ONLINE")
-
-    except Exception as e:
-        print("🔥 ERRO REAL NO STARTUP:", str(e))
-        raise
+    return {"status": "online"}
