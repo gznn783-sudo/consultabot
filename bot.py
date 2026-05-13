@@ -102,15 +102,31 @@ telegram_app.add_handler(CommandHandler("nome", nome))
 # =========================
 @app.on_event("startup")
 async def startup():
-    await telegram_app.initialize()
+    try:
+        await telegram_app.initialize()
 
-    if RENDER_URL:
-        webhook_url = f"{RENDER_URL}/webhook"
+        token = os.getenv("TOKEN")
+        url = os.getenv("RENDER_URL", "").rstrip("/")
+
+        if not token:
+            print("❌ TOKEN não definido")
+            return
+
+        if not url:
+            print("❌ RENDER_URL não definido")
+            return
+
+        webhook_url = f"{url}/webhook"
 
         await telegram_app.bot.set_webhook(
             url=webhook_url,
             drop_pending_updates=True
         )
+
+        print("✅ Bot iniciado com sucesso")
+
+    except Exception as e:
+        print("❌ ERRO NO STARTUP:", e)
 
 
 # =========================
