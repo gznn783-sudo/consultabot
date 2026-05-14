@@ -26,6 +26,7 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 TOKEN_CACHE = {"access_token": None, "expires_at": 0}
 AVAILABLE_CACHE = {"data": None, "expires_at": 0}
 USER_RESULTS = {}
+AUTO_CACHE = {}
 
 CNJ_REGEX = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
 
@@ -59,8 +60,8 @@ def get_codilo_token():
     )
 
     response.raise_for_status()
-
     data = response.json()
+
     token = data.get("access_token")
     expires_in = int(float(data.get("expires_in", 3600)))
 
@@ -94,7 +95,6 @@ def get_available():
     )
 
     response.raise_for_status()
-
     data = response.json().get("data", [])
 
     AVAILABLE_CACHE["data"] = data
@@ -260,7 +260,7 @@ def get_request_result(request_id):
     url = f"{REQUEST_URL}/{request_id}"
     ultimo_texto = ""
 
-    for _ in range(15):
+    for _ in range(12):
         try:
             response = requests.get(
                 url,
@@ -336,6 +336,7 @@ def buscar_cnjs(valor, tipo):
             resultado = get_request_result(request_id)
 
             cnjs = resultado.get("fallback_cnjs", []) if isinstance(resultado, dict) else []
+
             if not cnjs:
                 cnjs = achar_cnjs_no_objeto(resultado)
 
@@ -380,18 +381,16 @@ def criar_autorequest(cnj):
         or data.get("id")
     )
 
-    requests_list = data.get("data", {}).get("requests", [])
-
     if not auto_id:
         raise Exception(f"AutoRequest sem ID: {data}")
 
-    return auto_id, requests_list
+    return auto_id
 
 
 def consultar_autorequest(auto_id):
     url = f"{AUTOREQUEST_URL}/{auto_id}"
 
-    for _ in range(15):
+    for _ in range(5):
         response = requests.get(
             url,
             headers=codilo_headers(),
@@ -410,19 +409,11 @@ def consultar_autorequest(auto_id):
         ]
 
         if success_requests:
-            return success_requests
+            return success_requests, requests_list
 
-        pending = [
-            r for r in requests_list
-            if str(r.get("status", "")).lower() == "pending"
-        ]
+        time.sleep(6)
 
-        if not pending:
-            return requests_list
-
-        time.sleep(5)
-
-    return []
+    return [], requests_list if "requests_list" in locals() else []
 
 
 def get_any(obj, keys, default="Não informado"):
@@ -574,22 +565,34 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
 
 
 def buscar_detalhes_autorequest(cnj):
-    auto_id, initial_requests = criar_autorequest(cnj)
+    if cnj in AUTO_CACHE:
+        auto_id = AUTO_CACHE[cnj]["auto_id"]
+    else:
+        auto_id = criar_autorequest(cnj)
+        AUTO_CACHE[cnj] = {
+            "auto_id": auto_id,
+            "created_at": time.time()
+        }
 
-    success_requests = consultar_autorequest(auto_id)
+    success_requests, all_requests = consultar_autorequest(auto_id)
 
     if not success_requests:
-        success_requests = [
-            r for r in initial_requests
-            if str(r.get("status", "")).lower() == "success"
-        ]
+        status_resumo = []
 
-    if not success_requests:
+        for r in all_requests[:5]:
+            status_resumo.append(
+                f"{r.get('court') or r.get('search') or '?'}: {r.get('status') or '?'}"
+            )
+
+        resumo = "\n".join(status_resumo) if status_resumo else "Sem status interno retornado."
+
         return (
-            f"❌ Não consegui obter dados completos agora.\n\n"
+            f"⏳ A Codilo ainda não finalizou os dados completos.\n\n"
             f"Nº do processo: {cnj}\n"
-            f"AutoRequest ID: {auto_id}\n"
-            f"Status: sem requisição success ainda."
+            f"AutoRequest ID: {auto_id}\n\n"
+            f"Status interno:\n{resumo}\n\n"
+            f"Clique em 🔎 Ver detalhes novamente em 1 a 3 minutos.\n"
+            f"Não criei nova consulta para esse CNJ."
         )
 
     ultimo_erro = None
@@ -612,14 +615,14 @@ def buscar_detalhes_autorequest(cnj):
                     cnj_forcado=cnj
                 )
 
-            ultimo_erro = "Requisição success, mas sem lista de processos."
+            ultimo_erro = "Requisição success, mas sem dados de capa."
 
         except Exception as e:
             ultimo_erro = str(e)
             continue
 
     return (
-        f"❌ AutoRequest criada, mas não retornou capa completa.\n\n"
+        f"❌ Consulta finalizada, mas não retornou capa completa.\n\n"
         f"Nº do processo: {cnj}\n"
         f"AutoRequest ID: {auto_id}\n"
         f"Erro: {ultimo_erro or 'Não informado'}"
