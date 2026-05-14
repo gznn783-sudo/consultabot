@@ -1,226 +1,128 @@
 import os
 import re
 import requests
-from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# =========================================
-# CONFIG
-# =========================================
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-RENDER_URL = os.getenv("RENDER_URL")
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
+RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 app = FastAPI()
-
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# =========================================
-# HEADERS ANTI BLOQUEIO
-# =========================================
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
-    )
-}
+def extrair_numero(texto):
+    achou = re.findall(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}", texto)
+    return achou[0] if achou else "Não localizado"
 
-# =========================================
-# START
-# =========================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = (
-        "🔥 CONSULTABOT V6 BLACK EDITION 🔥\n\n"
-        "✅ Consulta por nome\n"
-        "✅ Busca processos públicos\n"
-        "✅ Sistema online\n\n"
-        "Envie o nome completo da pessoa."
-    )
+def detectar_tribunal(texto):
+    tribunais = ["TJRS", "TJSP", "TJMG", "TJRJ", "TJPR", "TJSC", "TRF1", "TRF2", "TRF3", "TRF4", "TRF5", "TRT", "STJ", "STF"]
+    for t in tribunais:
+        if t.lower() in texto.lower():
+            return t
+    return "Não informado"
 
-    await update.message.reply_text(texto)
 
-# =========================================
-# CONSULTA
-# =========================================
+def buscar_processos(nome):
+    if not SERPAPI_KEY:
+        return "❌ SERPAPI_KEY não configurada no Render."
 
-async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = "https://serpapi.com/search.json"
 
-    nome = update.message.text.strip()
-
-    if len(nome) < 4:
-        await update.message.reply_text(
-            "❌ Digite um nome válido."
-        )
-        return
-
-    mensagem = await update.message.reply_text(
-        "🔎 Consultando processos..."
-    )
-
-    resultado = buscar_google_jusbrasil(nome)
-
-    await mensagem.edit_text(resultado)
-
-# =========================================
-# GOOGLE + JUSBRASIL
-# =========================================
-
-def buscar_google_jusbrasil(nome):
+    params = {
+        "engine": "google",
+        "q": f'"{nome}" processo OR processos site:jusbrasil.com.br',
+        "hl": "pt-br",
+        "gl": "br",
+        "api_key": SERPAPI_KEY
+    }
 
     try:
+        r = requests.get(url, params=params, timeout=20)
+        data = r.json()
 
-        busca = nome.replace(" ", "+")
+        resultados = data.get("organic_results", [])
 
-        url = (
-            f"https://www.google.com/search?q="
-            f"site%3Ajusbrasil.com.br+{busca}"
-        )
+        if not resultados:
+            return "❌ Nenhum resultado encontrado pela SerpAPI."
 
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=20
-        )
+        resposta = f"🔎 Resultados para: {nome}\n\n"
 
-        if response.status_code != 200:
-            return "❌ Google bloqueou a consulta."
+        for i, item in enumerate(resultados[:10], start=1):
+            titulo = item.get("title", "Sem título")
+            snippet = item.get("snippet", "")
+            link = item.get("link", "")
 
-        soup = BeautifulSoup(response.text, "lxml")
+            texto = f"{titulo} {snippet}"
+            numero = extrair_numero(texto)
+            tribunal = detectar_tribunal(texto)
 
-        html = soup.get_text(" ")
-
-        links = re.findall(
-            r'https://www\.jusbrasil\.com\.br[^\s]+',
-            response.text
-        )
-
-        numeros = re.findall(
-            r'\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}',
-            html
-        )
-
-        tribunais = re.findall(
-            r'TJSP|TJRS|TJMG|TRF1|TRF3|TRF4|TRT',
-            html
-        )
-
-        resposta = (
-            f"🔥 CONSULTABOT V6 🔥\n\n"
-            f"👤 Nome: {nome}\n\n"
-        )
-
-        usados = set()
-
-        contador = 1
-
-        if numeros:
-
-            for numero in numeros[:10]:
-
-                if numero in usados:
-                    continue
-
-                usados.add(numero)
-
-                tribunal = (
-                    tribunais[contador - 1]
-                    if len(tribunais) >= contador
-                    else "Não informado"
-                )
-
-                resposta += (
-                    f"{contador}️⃣ Processo:\n"
-                    f"{numero}\n"
-                    f"🏛 Tribunal: {tribunal}\n\n"
-                )
-
-                contador += 1
-
-        if links:
-
-            resposta += "🔗 Links encontrados:\n\n"
-
-            for link in links[:5]:
-                resposta += f"{link}\n\n"
-
-        if not numeros and not links:
-            return (
-                "❌ Nenhum resultado encontrado.\n\n"
-                "⚠️ O Google/JusBrasil pode ter limitado "
-                "a busca temporariamente."
+            resposta += (
+                f"{i}️⃣ 📁 Processo: {numero}\n"
+                f"🏛 Tribunal: {tribunal}\n"
+                f"📌 {titulo[:120]}\n"
+                f"📝 {snippet[:250]}\n"
+                f"🌐 {link}\n\n"
             )
 
         return resposta[:4000]
 
     except Exception as e:
-        return f"❌ Erro na consulta:\n{str(e)}"
+        return f"❌ Erro na SerpAPI: {str(e)}"
 
-# =========================================
-# WEBHOOK
-# =========================================
 
-@app.post("/")
-async def webhook(request: Request):
-
-    data = await request.json()
-
-    update = Update.de_json(
-        data,
-        telegram_app.bot
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔥 ConsultaBot V7 Online\n\n"
+        "Use:\n"
+        "/buscar Nome Completo\n\n"
+        "Ou envie apenas o nome."
     )
 
-    await telegram_app.process_update(update)
 
+async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        nome = " ".join(context.args).strip()
+    else:
+        nome = update.message.text.strip()
+
+    msg = await update.message.reply_text("🔎 Consultando...")
+
+    resultado = buscar_processos(nome)
+
+    await msg.edit_text(resultado)
+
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("buscar", consultar))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consultar))
+
+
+@app.post("/webhook")
+async def webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
     return {"ok": True}
 
-# =========================================
-# HOME
-# =========================================
 
 @app.get("/")
-async def home():
-    return {
-        "status": "CONSULTABOT V6 BLACK EDITION ONLINE"
-    }
+def home():
+    return {"status": "ConsultaBot V7 Online"}
 
-# =========================================
-# STARTUP
-# =========================================
 
 @app.on_event("startup")
 async def startup():
-
-    telegram_app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    telegram_app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            consultar
-        )
-    )
-
     await telegram_app.initialize()
 
     await telegram_app.bot.set_webhook(
-        url=RENDER_URL
+        url=f"{RENDER_URL}/webhook",
+        drop_pending_updates=True
     )
 
-# =========================================
-# SHUTDOWN
-# =========================================
 
 @app.on_event("shutdown")
 async def shutdown():
