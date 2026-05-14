@@ -18,6 +18,7 @@ MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "80"))
 AUTH_URL = "https://auth.codilo.com.br/oauth/token"
 AVAILABLE_URL = "https://api.consulta.codilo.com.br/v1/available"
 REQUEST_URL = "https://api.consulta.codilo.com.br/v1/request"
+LIST_REQUEST_URL = "https://api.consulta.codilo.com.br/v1/request"
 
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
@@ -313,6 +314,31 @@ def get_request_result(request_id):
     return {"success": False, "status": "timeout", "data": []}
 
 
+def listar_requests(search=None):
+    params = {
+        "page": 1,
+        "limit": 20
+    }
+
+    if search:
+        params["search"] = search
+
+    response = requests.get(
+        LIST_REQUEST_URL,
+        headers=codilo_headers(),
+        params=params,
+        timeout=30
+    )
+
+    print("CODILO LIST STATUS:", response.status_code)
+    print("CODILO LIST RESPONSE:", response.text[:2000])
+
+    if response.status_code not in [200, 201]:
+        raise Exception(f"List {response.status_code}: {response.text[:500]}")
+
+    return response.json()
+
+
 def get_any(obj, keys, default="Não informado"):
     if not isinstance(obj, dict):
         return default
@@ -585,7 +611,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/oab 123636--RS\n"
         "/nomeparte Nome da Parte\n"
         "/mapacodilo\n"
-        "/debugcodilo"
+        "/debugcodilo\n"
+        "/listacodilo tjrs"
     )
 
 
@@ -656,6 +683,72 @@ async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Debug Codilo erro:\n{str(e)}")
 
 
+async def listacodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        filtro = None
+
+        if context.args:
+            filtro = context.args[0]
+
+        data = listar_requests(filtro)
+
+        items = (
+            data.get("data")
+            or data.get("items")
+            or data.get("results")
+            or []
+        )
+
+        if isinstance(items, dict):
+            items = (
+                items.get("items")
+                or items.get("results")
+                or items.get("data")
+                or []
+            )
+
+        if not items:
+            await update.message.reply_text("❌ Nenhuma request encontrada.")
+            return
+
+        resposta = "📋 Últimas requests Codilo:\n\n"
+
+        for i, item in enumerate(items[:10], start=1):
+            request_id = item.get("id") or item.get("_id") or "?"
+            search = item.get("search") or "?"
+            query = item.get("query") or "?"
+            status = (
+                item.get("status")
+                or item.get("requested", {}).get("status")
+                or "?"
+            )
+            success = item.get("success")
+            erro = (
+                item.get("error")
+                or item.get("message")
+                or item.get("requested", {}).get("message")
+                or "Sem erro"
+            )
+
+            resposta += (
+                f"========== {i} ==========\n"
+                f"ID: {request_id}\n"
+                f"Search: {search}\n"
+                f"Query: {query}\n"
+                f"Status: {status}\n"
+                f"Success: {success}\n"
+                f"Erro: {str(erro)[:120]}\n\n"
+            )
+
+            if len(resposta) > 3500:
+                break
+
+        await update.message.reply_text(resposta[:4000])
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro listando requests:\n{str(e)}")
+
+
 async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valor = " ".join(context.args).strip()
 
@@ -695,6 +788,7 @@ async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("mapacodilo", mapacodilo))
 telegram_app.add_handler(CommandHandler("debugcodilo", debugcodilo))
+telegram_app.add_handler(CommandHandler("listacodilo", listacodilo))
 telegram_app.add_handler(CommandHandler("nomeadv", nomeadv))
 telegram_app.add_handler(CommandHandler("oab", oab))
 telegram_app.add_handler(CommandHandler("nomeparte", nomeparte))
