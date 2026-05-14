@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import requests
@@ -11,7 +12,9 @@ RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
 
 CODILO_KEY = os.getenv("CODILO_KEY")
 CODILO_SECRET = os.getenv("CODILO_SECRET")
-MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "15"))
+
+MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "80"))
+MAX_ENRICH_CNJ = int(os.getenv("MAX_ENRICH_CNJ", "10"))
 
 AUTH_URL = "https://auth.codilo.com.br/oauth/token"
 AVAILABLE_URL = "https://api.consulta.codilo.com.br/v1/available"
@@ -23,15 +26,32 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 TOKEN_CACHE = {"access_token": None, "expires_at": 0}
 AVAILABLE_CACHE = {"data": None, "expires_at": 0}
 
-TRIBUNAIS_PERMITIDOS = {
+TRIBUNAIS_LIBERADOS = {
+    # RS
     "tjrs", "trf4", "trt4",
+
+    # SC
     "tjsc", "trt12",
+
+    # GO
     "tjgo", "trt18", "trf1",
+
+    # TO
     "tjto",
+
+    # DF
     "tjdft", "trt10",
-    "tjmg", "trt3"
+
+    # MG
+    "tjmg", "trt3",
 }
 
+CNJ_REGEX = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
+
+
+# =========================================================
+# CODILO TOKEN
+# =========================================================
 
 def get_codilo_token():
     now = time.time()
@@ -58,6 +78,7 @@ def get_codilo_token():
     response.raise_for_status()
 
     data = response.json()
+
     token = data.get("access_token")
     expires_in = int(float(data.get("expires_in", 3600)))
 
@@ -77,6 +98,10 @@ def codilo_headers():
         "accept": "*/*"
     }
 
+
+# =========================================================
+# AVAILABLE
+# =========================================================
 
 def get_available():
     now = time.time()
@@ -135,9 +160,9 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
         params = [params]
 
     if params and novo_ctx.get("platform") and novo_ctx.get("search") and novo_ctx.get("query"):
-        search_lower = str(novo_ctx["search"]).lower()
+        tribunal = str(novo_ctx["search"]).lower()
 
-        if search_lower in TRIBUNAIS_PERMITIDOS:
+        if tribunal in TRIBUNAIS_LIBERADOS:
             for param in params:
                 if not isinstance(param, dict):
                     continue
@@ -161,6 +186,7 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
     for key, value in node.items():
         if key in ["params", "parameters"]:
             continue
+
         if isinstance(value, (dict, list)):
             extrair_queries_disponiveis(value, param_keys, novo_ctx.copy(), saida)
 
@@ -169,7 +195,11 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
 
 def find_queries(param_keys):
     available = get_available()
-    consultas = extrair_queries_disponiveis(available, param_keys)
+
+    consultas = extrair_queries_disponiveis(
+        available,
+        param_keys
+    )
 
     unicas = []
     vistos = set()
@@ -189,6 +219,31 @@ def find_queries(param_keys):
 
     return unicas[:MAX_CODILO_REQUESTS]
 
+
+def find_cnj_queries(tribunal_preferido=None):
+    queries = find_queries([
+        "cnj",
+        "numero",
+        "numeroProcesso",
+        "processo",
+        "processNumber"
+    ])
+
+    if tribunal_preferido:
+        preferidas = [
+            q for q in queries
+            if str(q.get("search", "")).lower() == str(tribunal_preferido).lower()
+        ]
+
+        if preferidas:
+            return preferidas
+
+    return queries
+
+
+# =========================================================
+# CREATE / RESULT
+# =========================================================
 
 def create_request(item, value):
     payload = {
@@ -264,8 +319,16 @@ def get_request_result(request_id):
 
         time.sleep(5)
 
-    return {"success": False, "status": "timeout", "data": []}
+    return {
+        "success": False,
+        "status": "timeout",
+        "data": []
+    }
 
+
+# =========================================================
+# EXTRATORES
+# =========================================================
 
 def get_any(obj, keys, default="Não informado"):
     if not isinstance(obj, dict):
@@ -273,6 +336,7 @@ def get_any(obj, keys, default="Não informado"):
 
     for key in keys:
         value = obj.get(key)
+
         if value not in [None, "", [], {}]:
             return value
 
@@ -291,6 +355,7 @@ def normalizar_nome(pessoa):
         or pessoa.get("nome")
         or pessoa.get("value")
         or pessoa.get("description")
+        or pessoa.get("label")
         or "Não informado"
     )
 
@@ -301,6 +366,7 @@ def extrair_pessoas(processo):
         or processo.get("partes")
         or processo.get("persons")
         or processo.get("parties")
+        or processo.get("envolvidos")
         or []
     )
 
@@ -320,13 +386,29 @@ def extrair_pessoas(processo):
             str(pessoa.get("side", "")),
             str(pessoa.get("qualifier", "")),
             str(pessoa.get("description", "")),
+            str(pessoa.get("kind", "")),
         ]).lower()
 
         if "adv" in tipo or "lawyer" in tipo:
             advogados.append(nome)
-        elif "autor" in tipo or "requerente" in tipo or "exequente" in tipo or "active" in tipo:
+
+        elif (
+            "autor" in tipo
+            or "requerente" in tipo
+            or "exequente" in tipo
+            or "active" in tipo
+            or "parte ativa" in tipo
+        ):
             autores.append(nome)
-        elif "réu" in tipo or "reu" in tipo or "requerido" in tipo or "executado" in tipo or "passive" in tipo:
+
+        elif (
+            "réu" in tipo
+            or "reu" in tipo
+            or "requerido" in tipo
+            or "executado" in tipo
+            or "passive" in tipo
+            or "parte passiva" in tipo
+        ):
             reus.append(nome)
 
         for adv in pessoa.get("lawyers", []) or pessoa.get("advogados", []):
@@ -346,25 +428,74 @@ def extrair_lista_processos(resultado):
         return data
 
     if isinstance(data, dict):
-        for chave in ["items", "processes", "processos", "result", "results"]:
+        for chave in [
+            "items",
+            "processes",
+            "processos",
+            "result",
+            "results",
+            "lawsuits",
+            "records"
+        ]:
             if isinstance(data.get(chave), list):
                 return data.get(chave)
 
-        if data.get("properties") or data.get("people"):
+        if data.get("properties") or data.get("people") or data.get("number"):
             return [data]
 
     return []
 
 
-def formatar_processo(processo, fallback_tribunal="Não informado"):
-    props = processo.get("properties") or processo.get("capa") or processo
+def achar_cnjs_no_objeto(obj):
+    texto = str(obj)
+    return list(set(re.findall(CNJ_REGEX, texto)))
+
+
+def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
+    props = (
+        processo.get("properties")
+        or processo.get("capa")
+        or processo.get("cover")
+        or processo
+    )
+
     pessoas = extrair_pessoas(processo)
 
-    numero = get_any(props, ["number", "cnj", "numero", "numeroProcesso", "processo"])
-    tribunal = get_any(props, ["court", "tribunal", "search"], fallback_tribunal)
-    origem = get_any(props, ["origin", "origem", "foro", "comarca"], "Não informado")
-    assunto = get_any(props, ["subject", "assunto", "area", "classe", "class"], "Não informado")
-    valor = get_any(props, ["value", "valor", "valorCausa", "valor_da_causa"], "Não informado")
+    numero = (
+        cnj_forcado
+        or get_any(props, [
+            "number",
+            "cnj",
+            "numero",
+            "numeroProcesso",
+            "processo",
+            "processNumber"
+        ])
+    )
+
+    tribunal = get_any(
+        props,
+        ["court", "tribunal", "search", "tribunalNome"],
+        fallback_tribunal
+    )
+
+    origem = get_any(
+        props,
+        ["origin", "origem", "foro", "comarca", "vara"],
+        "Não informado"
+    )
+
+    assunto = get_any(
+        props,
+        ["subject", "assunto", "area", "classe", "class", "nature"],
+        "Não informado"
+    )
+
+    valor = get_any(
+        props,
+        ["value", "valor", "valorCausa", "valor_da_causa", "claimValue"],
+        "Não informado"
+    )
 
     return (
         f"Prezado Cliente!\n\n"
@@ -378,6 +509,37 @@ def formatar_processo(processo, fallback_tribunal="Não informado"):
         f"Advogado: {pessoas['advogado']}\n"
     )
 
+
+# =========================================================
+# ENRIQUECIMENTO POR CNJ
+# =========================================================
+
+def enriquecer_por_cnj(cnj, tribunal_preferido=None):
+    queries_cnj = find_cnj_queries(tribunal_preferido)
+
+    if not queries_cnj:
+        return None
+
+    for item in queries_cnj[:8]:
+        try:
+            request_id = create_request(item, cnj)
+            resultado = get_request_result(request_id)
+
+            processos = extrair_lista_processos(resultado)
+
+            if processos:
+                return processos[0]
+
+        except Exception as e:
+            print("ERRO ENRIQUECER CNJ:", cnj, str(e))
+            continue
+
+    return None
+
+
+# =========================================================
+# BUSCA PRINCIPAL
+# =========================================================
 
 def executar_busca(valor, tipo):
     if tipo == "nomeadv":
@@ -395,12 +557,10 @@ def executar_busca(valor, tipo):
         return f"❌ Erro ao buscar abrangência da Codilo:\n{str(e)}"
 
     if not consultas:
-        return (
-            "❌ Nenhum tribunal filtrado disponível para esse tipo de busca.\n\n"
-            "Tente outro comando, como /oab ou /nomeparte."
-        )
+        return "❌ Nenhum tribunal disponível para esse tipo de busca."
 
     processos_unicos = {}
+    cnjs_encontrados = {}
     erros = []
 
     for item in consultas:
@@ -422,23 +582,45 @@ def executar_busca(valor, tipo):
                     or props.get("numero")
                     or props.get("numeroProcesso")
                     or props.get("processo")
+                    or props.get("processNumber")
                 )
 
                 if not numero:
-                    numero = f"sem-numero-{len(processos_unicos) + 1}"
+                    encontrados = achar_cnjs_no_objeto(processo)
+                    numero = encontrados[0] if encontrados else None
 
-                if numero not in processos_unicos:
+                if numero:
                     processos_unicos[numero] = {
                         "processo": processo,
                         "tribunal": item.get("search", "Não informado")
                     }
+                    cnjs_encontrados[numero] = item.get("search", "Não informado")
+
+            cnjs_texto = achar_cnjs_no_objeto(resultado)
+
+            for cnj in cnjs_texto:
+                if cnj not in processos_unicos:
+                    processos_unicos[cnj] = {
+                        "processo": {
+                            "properties": {
+                                "number": cnj
+                            },
+                            "people": []
+                        },
+                        "tribunal": item.get("search", "Não informado")
+                    }
+
+                    cnjs_encontrados[cnj] = item.get("search", "Não informado")
 
         except Exception as e:
-            erros.append(f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:180]}")
+            erros.append(
+                f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:200]}"
+            )
             continue
 
     if not processos_unicos:
         erro_exemplo = "\n".join(erros[:5]) if erros else "Sem erro detalhado."
+
         return (
             "❌ Nenhum processo encontrado.\n\n"
             f"Consultas tentadas: {len(consultas)}\n"
@@ -446,14 +628,41 @@ def executar_busca(valor, tipo):
             f"Primeiros erros:\n{erro_exemplo}"
         )
 
+    # Enriquecer CNJs encontrados
+    enriquecidos = {}
+    contador_enriquecimento = 0
+
+    for cnj, item in processos_unicos.items():
+        if contador_enriquecimento >= MAX_ENRICH_CNJ:
+            enriquecidos[cnj] = item
+            continue
+
+        tribunal = item.get("tribunal")
+        processo_enriquecido = enriquecer_por_cnj(cnj, tribunal)
+
+        if processo_enriquecido:
+            enriquecidos[cnj] = {
+                "processo": processo_enriquecido,
+                "tribunal": tribunal
+            }
+        else:
+            enriquecidos[cnj] = item
+
+        contador_enriquecimento += 1
+
     resposta = (
-        f"🔎 Resultados encontrados: {len(processos_unicos)}\n"
-        f"Consultas realizadas: {len(consultas)}\n\n"
+        f"🔎 Resultados encontrados: {len(enriquecidos)}\n"
+        f"Consultas principais realizadas: {len(consultas)}\n"
+        f"CNJs enriquecidos: {min(len(enriquecidos), MAX_ENRICH_CNJ)}\n\n"
     )
 
-    for i, item in enumerate(processos_unicos.values(), start=1):
+    for i, (cnj, item) in enumerate(enriquecidos.items(), start=1):
         resposta += f"========== {i} ==========\n"
-        resposta += formatar_processo(item["processo"], item["tribunal"])
+        resposta += formatar_processo(
+            item["processo"],
+            item["tribunal"],
+            cnj_forcado=cnj
+        )
         resposta += "\n"
 
         if len(resposta) > 3800:
@@ -463,12 +672,16 @@ def executar_busca(valor, tipo):
     return resposta[:4000]
 
 
+# =========================================================
+# COMANDOS TELEGRAM
+# =========================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🇧🇷 ConsultaBot Codilo Online\n\n"
         "Comandos:\n"
         "/nomeadv Nome do Advogado\n"
-        "/oab 12345-RS\n"
+        "/oab 123636--RS\n"
         "/nomeparte Nome da Parte\n"
         "/debugcodilo"
     )
@@ -482,6 +695,7 @@ async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nomeadv_q = find_queries(["nomeadv", "nomeadvogado"])
         oab_q = find_queries(["oab"])
         parte_q = find_queries(["nomeparte", "nome"])
+        cnj_q = find_cnj_queries()
 
         await update.message.reply_text(
             "✅ Codilo conectada.\n\n"
@@ -489,8 +703,10 @@ async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Abrangência recebida: {len(available)} itens\n"
             f"Consultas nomeadv filtradas: {len(nomeadv_q)}\n"
             f"Consultas OAB filtradas: {len(oab_q)}\n"
-            f"Consultas nomeparte filtradas: {len(parte_q)}"
+            f"Consultas nomeparte filtradas: {len(parte_q)}\n"
+            f"Consultas CNJ filtradas: {len(cnj_q)}"
         )
+
     except Exception as e:
         await update.message.reply_text(f"❌ Debug Codilo erro:\n{str(e)}")
 
@@ -502,8 +718,14 @@ async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /nomeadv Nome do Advogado")
         return
 
-    msg = await update.message.reply_text("🔎 Consultando advogado nos tribunais filtrados...")
-    resultado = await asyncio.to_thread(executar_busca, valor, "nomeadv")
+    msg = await update.message.reply_text("🔎 Consultando advogado nos tribunais liberados...")
+
+    resultado = await asyncio.to_thread(
+        executar_busca,
+        valor,
+        "nomeadv"
+    )
+
     await msg.edit_text(resultado)
 
 
@@ -511,11 +733,17 @@ async def oab(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valor = " ".join(context.args).strip()
 
     if not valor:
-        await update.message.reply_text("Use: /oab 12345-RS")
+        await update.message.reply_text("Use: /oab 123636--RS")
         return
 
-    msg = await update.message.reply_text("🔎 Consultando OAB nos tribunais filtrados...")
-    resultado = await asyncio.to_thread(executar_busca, valor, "oab")
+    msg = await update.message.reply_text("🔎 Consultando OAB nos tribunais liberados...")
+
+    resultado = await asyncio.to_thread(
+        executar_busca,
+        valor,
+        "oab"
+    )
+
     await msg.edit_text(resultado)
 
 
@@ -526,8 +754,14 @@ async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /nomeparte Nome da Parte")
         return
 
-    msg = await update.message.reply_text("🔎 Consultando parte nos tribunais filtrados...")
-    resultado = await asyncio.to_thread(executar_busca, valor, "nomeparte")
+    msg = await update.message.reply_text("🔎 Consultando parte nos tribunais liberados...")
+
+    resultado = await asyncio.to_thread(
+        executar_busca,
+        valor,
+        "nomeparte"
+    )
+
     await msg.edit_text(resultado)
 
 
@@ -538,11 +772,21 @@ telegram_app.add_handler(CommandHandler("oab", oab))
 telegram_app.add_handler(CommandHandler("nomeparte", nomeparte))
 
 
+# =========================================================
+# FASTAPI / WEBHOOK
+# =========================================================
+
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
-    update = Update.de_json(data, telegram_app.bot)
+
+    update = Update.de_json(
+        data,
+        telegram_app.bot
+    )
+
     await telegram_app.process_update(update)
+
     return {"ok": True}
 
 
