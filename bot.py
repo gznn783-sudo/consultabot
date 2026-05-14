@@ -1,154 +1,162 @@
+# ===============================
+# CONSULTABOT BRASIL V5 PROFISSIONAL
+# Render + Telegram + Anti Bloqueio JusBrasil
+# ===============================
+
 import os
-import re
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+import uvicorn
+import asyncio
+import random
 
-# =========================
+# ===============================
 # CONFIG
-# =========================
-TOKEN = os.getenv("TOKEN")
+# ===============================
+
+TOKEN = os.getenv("BOT_TOKEN")
 RENDER_URL = os.getenv("RENDER_URL")
 
 app = FastAPI()
 
+# ===============================
+# TELEGRAM APP
+# ===============================
+
 telegram_app = Application.builder().token(TOKEN).build()
 
-
-# =========================
+# ===============================
 # START
-# =========================
+# ===============================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 ConsultaBot V4 PROFISSIONAL ONLINE\n\n"
-        "Envie o nome completo da pessoa para consultar processos."
+        "🇧🇷 ConsultaBot Brasil V5 Online\n\n"
+        "Envie:\n"
+        "• Nome completo\n"
+        "• CPF\n"
+        "• Processo\n"
     )
 
+telegram_app.add_handler(CommandHandler("start", start))
 
-# =========================
-# CONSULTA
-# =========================
-async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nome = update.message.text.strip()
+# ===============================
+# USER AGENTS
+# ===============================
 
-    msg = await update.message.reply_text("🔍 Consultando processos reais...")
+USER_AGENTS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+    "Mozilla/5.0 (Linux; Android 13)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+]
 
-    resultado = buscar_processos(nome)
+# ===============================
+# CONSULTA JUSBRASIL
+# ===============================
 
-    await msg.edit_text(resultado)
+def consultar_jusbrasil(texto):
+    url = f"https://www.jusbrasil.com.br/busca?q={texto}"
 
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "pt-BR,pt;q=0.9",
+        "Referer": "https://www.google.com/",
+        "Accept": "text/html",
+    }
 
-# =========================
-# BUSCA REAL SEM PLAYWRIGHT
-# =========================
-def buscar_processos(nome):
     try:
-        busca = nome.replace(" ", "+")
-
-        url = f"https://www.jusbrasil.com.br/busca?q={busca}"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        response = requests.get(url, headers=headers, timeout=15)
-
-        if response.status_code != 200:
-            return "❌ Falha ao acessar JusBrasil."
-
-        html = response.text
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        texto = soup.get_text(" ", strip=True)
-
-        processos = re.findall(
-            r'\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}',
-            texto
+        r = requests.get(
+            url,
+            headers=headers,
+            timeout=20
         )
 
-        tribunais = re.findall(
-            r'TJSP|TJMG|TJRS|TJPR|TJSC|TRF1|TRF2|TRF3|TRF4|TRF5|TRT',
-            texto
-        )
+        if r.status_code != 200:
+            return "❌ JusBrasil bloqueou acesso."
 
-        if not processos:
-            return f"❌ Nenhum processo encontrado para {nome}"
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        resposta = f"🔎 Resultados para: {nome}\n\n"
+        textos = soup.get_text("\n", strip=True)
 
-        usados = set()
+        if "processo" in textos.lower():
+            return textos[:3500]
 
-        contador = 1
-
-        for proc in processos:
-            if proc in usados:
-                continue
-
-            usados.add(proc)
-
-            tribunal = (
-                tribunais[contador - 1]
-                if len(tribunais) >= contador
-                else "Não informado"
-            )
-
-            resposta += (
-                f"{contador}️⃣ Processo:\n"
-                f"{proc}\n"
-                f"🏛 Tribunal: {tribunal}\n\n"
-            )
-
-            contador += 1
-
-            if contador > 10:
-                break
-
-        return resposta
+        return "❌ Nenhum resultado encontrado."
 
     except Exception as e:
-        return f"❌ Erro na consulta: {str(e)}"
+        return f"❌ Erro consulta: {str(e)}"
 
+# ===============================
+# MSG
+# ===============================
 
-# =========================
-# WEBHOOK
-# =========================
-@app.post("/")
-async def webhook(req: Request):
-    data = await req.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"ok": True}
+async def receber(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text.strip()
 
+    await update.message.reply_text("🔎 Consultando...")
 
-# =========================
-# STATUS
-# =========================
-@app.get("/")
-async def home():
-    return {"status": "ConsultaBot V4 PROFISSIONAL ONLINE"}
-
-
-# =========================
-# STARTUP
-# =========================
-@app.on_event("startup")
-async def startup():
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, consultar)
+    resultado = await asyncio.to_thread(
+        consultar_jusbrasil,
+        texto
     )
 
+    await update.message.reply_text(resultado)
+
+telegram_app.add_handler(
+    MessageHandler(filters.TEXT & ~filters.COMMAND, receber)
+)
+
+# ===============================
+# WEBHOOK
+# ===============================
+
+@app.on_event("startup")
+async def startup():
     await telegram_app.initialize()
+    await telegram_app.start()
 
-    await telegram_app.bot.set_webhook(url=RENDER_URL)
+    if RENDER_URL:
+        await telegram_app.bot.set_webhook(
+            url=f"{RENDER_URL}/webhook"
+        )
 
+@app.post("/webhook")
+async def webhook(req: Request):
+    data = await req.json()
 
-# =========================
-# SHUTDOWN
-# =========================
-@app.on_event("shutdown")
-async def shutdown():
-    await telegram_app.shutdown()
+    update = Update.de_json(
+        data,
+        telegram_app.bot
+    )
+
+    await telegram_app.process_update(update)
+
+    return {"ok": True}
+
+@app.get("/")
+def home():
+    return {
+        "status": "ConsultaBot Brasil V5 Online"
+    }
+
+# ===============================
+# MAIN
+# ===============================
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
