@@ -25,8 +25,12 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 TOKEN_CACHE = {"access_token": None, "expires_at": 0}
 AVAILABLE_CACHE = {"data": None, "expires_at": 0}
+
 USER_RESULTS = {}
 AUTO_CACHE = {}
+DETAIL_CACHE = {}
+
+PAGE_SIZE = 8
 
 CNJ_REGEX = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
 
@@ -124,6 +128,26 @@ def extrair_ano_cnj(cnj):
 
 def achar_cnjs_no_objeto(obj):
     return list(set(re.findall(CNJ_REGEX, str(obj))))
+
+
+def buscar_recursivo(obj, chaves):
+    if isinstance(obj, dict):
+        for chave in chaves:
+            if chave in obj and obj[chave] not in [None, "", [], {}]:
+                return obj[chave]
+
+        for valor in obj.values():
+            encontrado = buscar_recursivo(valor, chaves)
+            if encontrado not in [None, "", [], {}]:
+                return encontrado
+
+    elif isinstance(obj, list):
+        for item in obj:
+            encontrado = buscar_recursivo(item, chaves)
+            if encontrado not in [None, "", [], {}]:
+                return encontrado
+
+    return None
 
 
 def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
@@ -426,6 +450,11 @@ def get_any(obj, keys, default="Não informado"):
         if value not in [None, "", [], {}]:
             return value
 
+    recursive = buscar_recursivo(obj, keys)
+
+    if recursive not in [None, "", [], {}]:
+        return recursive
+
     return default
 
 
@@ -454,6 +483,7 @@ def extrair_pessoas(processo):
         or processo.get("persons")
         or processo.get("parties")
         or processo.get("envolvidos")
+        or processo.get("subjects")
         or []
     )
 
@@ -474,6 +504,7 @@ def extrair_pessoas(processo):
             str(pessoa.get("qualifier", "")),
             str(pessoa.get("description", "")),
             str(pessoa.get("kind", "")),
+            str(pessoa.get("pole", "")),
         ]).lower()
 
         if "adv" in tipo or "lawyer" in tipo:
@@ -485,6 +516,24 @@ def extrair_pessoas(processo):
 
         for adv in pessoa.get("lawyers", []) or pessoa.get("advogados", []):
             advogados.append(normalizar_nome(adv))
+
+    if not autores:
+        autor_rec = buscar_recursivo(processo, ["autor", "author", "plaintiff", "claimant"])
+        if autor_rec:
+            autores.append(normalizar_nome(autor_rec) if isinstance(autor_rec, dict) else str(autor_rec))
+
+    if not reus:
+        reu_rec = buscar_recursivo(processo, ["reu", "réu", "requerido", "defendant"])
+        if reu_rec:
+            reus.append(normalizar_nome(reu_rec) if isinstance(reu_rec, dict) else str(reu_rec))
+
+    if not advogados:
+        adv_rec = buscar_recursivo(processo, ["advogado", "advogados", "lawyer", "lawyers"])
+        if adv_rec:
+            if isinstance(adv_rec, list) and adv_rec:
+                advogados.append(normalizar_nome(adv_rec[0]))
+            else:
+                advogados.append(normalizar_nome(adv_rec) if isinstance(adv_rec, dict) else str(adv_rec))
 
     return {
         "autor": autores[0] if autores else "Não informado",
@@ -507,7 +556,9 @@ def extrair_lista_processos(resultado):
             "result",
             "results",
             "lawsuits",
-            "records"
+            "records",
+            "lawsuit",
+            "process"
         ]:
             if isinstance(data.get(chave), list):
                 return data.get(chave)
@@ -515,11 +566,19 @@ def extrair_lista_processos(resultado):
         if data.get("properties") or data.get("people") or data.get("number"):
             return [data]
 
+        return [data]
+
     return []
 
 
 def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
-    props = processo.get("properties") or processo.get("capa") or processo.get("cover") or processo
+    props = (
+        processo.get("properties")
+        or processo.get("capa")
+        or processo.get("cover")
+        or processo
+    )
+
     pessoas = extrair_pessoas(processo)
 
     numero = cnj_forcado or get_any(
@@ -529,25 +588,25 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
 
     tribunal = get_any(
         props,
-        ["court", "tribunal", "search", "tribunalNome"],
+        ["court", "tribunal", "search", "tribunalNome", "forum"],
         fallback_tribunal
     )
 
     origem = get_any(
         props,
-        ["origin", "origem", "foro", "comarca", "vara"],
+        ["origin", "origem", "foro", "comarca", "vara", "courtSection", "judgingBody"],
         "Não informado"
     )
 
     assunto = get_any(
         props,
-        ["subject", "assunto", "area", "classe", "class", "nature"],
+        ["subject", "assunto", "subjects", "area", "classe", "class", "nature", "matter"],
         "Não informado"
     )
 
     valor = get_any(
         props,
-        ["value", "valor", "valorCausa", "valor_da_causa", "claimValue"],
+        ["value", "valor", "valorCausa", "valor_da_causa", "claimValue", "amount"],
         "Não informado"
     )
 
@@ -565,6 +624,9 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
 
 
 def buscar_detalhes_autorequest(cnj):
+    if cnj in DETAIL_CACHE:
+        return DETAIL_CACHE[cnj]
+
     if cnj in AUTO_CACHE:
         auto_id = AUTO_CACHE[cnj]["auto_id"]
     else:
@@ -586,7 +648,7 @@ def buscar_detalhes_autorequest(cnj):
 
         resumo = "\n".join(status_resumo) if status_resumo else "Sem status interno retornado."
 
-        return (
+        resposta = (
             f"⏳ A Codilo ainda não finalizou os dados completos.\n\n"
             f"Nº do processo: {cnj}\n"
             f"AutoRequest ID: {auto_id}\n\n"
@@ -594,6 +656,8 @@ def buscar_detalhes_autorequest(cnj):
             f"Clique em 🔎 Ver detalhes novamente em 1 a 3 minutos.\n"
             f"Não criei nova consulta para esse CNJ."
         )
+
+        return resposta
 
     ultimo_erro = None
 
@@ -609,11 +673,14 @@ def buscar_detalhes_autorequest(cnj):
             processos = extrair_lista_processos(resultado)
 
             if processos:
-                return formatar_processo(
+                resposta = formatar_processo(
                     processos[0],
                     fallback_tribunal=tribunal,
                     cnj_forcado=cnj
                 )
+
+                DETAIL_CACHE[cnj] = resposta
+                return resposta
 
             ultimo_erro = "Requisição success, mas sem dados de capa."
 
@@ -621,12 +688,14 @@ def buscar_detalhes_autorequest(cnj):
             ultimo_erro = str(e)
             continue
 
-    return (
+    resposta = (
         f"❌ Consulta finalizada, mas não retornou capa completa.\n\n"
         f"Nº do processo: {cnj}\n"
         f"AutoRequest ID: {auto_id}\n"
         f"Erro: {ultimo_erro or 'Não informado'}"
     )
+
+    return resposta
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -734,29 +803,29 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Busca expirada. Faça uma nova consulta.")
         return
 
-    processos_ano = session["processos_por_ano"].get(ano, {})
+    processos_ano = list(session["processos_por_ano"].get(ano, {}).values())
 
     if not processos_ano:
         await query.edit_message_text("❌ Nenhum processo encontrado para esse ano.")
         return
 
-    itens = list(processos_ano.values())
+    itens = processos_ano[:PAGE_SIZE]
 
     texto = (
         f"📂 Processos do ano {ano}\n"
-        f"Total encontrado: {len(itens)}\n\n"
-        "Clique em 🔎 Ver detalhes para consultar a capa completa:"
+        f"Total encontrado: {len(processos_ano)}\n"
+        f"Exibindo: {len(itens)}\n\n"
+        "Clique em apenas um processo para ver detalhes:"
     )
 
     keyboard = []
 
     for i, item in enumerate(itens, start=1):
         cnj = item["cnj"]
-        tribunal = item.get("tribunal", "Não informado")
 
         keyboard.append([
             InlineKeyboardButton(
-                f"🔎 {i}. {cnj} | {tribunal}",
+                f"🔎 {i}. {cnj}",
                 callback_data=f"detalhe:{cnj}"
             )
         ])
@@ -771,12 +840,7 @@ async def callback_detalhe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Consultando detalhes...")
 
-    data = query.data
-
-    if not data.startswith("detalhe:"):
-        return
-
-    cnj = data.split(":", 1)[1]
+    cnj = query.data.split(":", 1)[1]
 
     await query.edit_message_text(
         f"🔎 Consultando detalhes do processo:\n{cnj}\n\nAguarde..."
