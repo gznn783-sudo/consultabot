@@ -18,6 +18,7 @@ MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "80"))
 AUTH_URL = "https://auth.codilo.com.br/oauth/token"
 AVAILABLE_URL = "https://api.consulta.codilo.com.br/v1/available"
 REQUEST_URL = "https://api.consulta.codilo.com.br/v1/request"
+AUTOREQUEST_URL = "https://api.consulta.codilo.com.br/v1/autorequest"
 
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
@@ -58,10 +59,13 @@ def get_codilo_token():
     )
 
     response.raise_for_status()
-    data = response.json()
 
+    data = response.json()
     token = data.get("access_token")
     expires_in = int(float(data.get("expires_in", 3600)))
+
+    if not token:
+        raise Exception(f"Codilo não retornou access_token: {data}")
 
     TOKEN_CACHE["access_token"] = token
     TOKEN_CACHE["expires_at"] = now + expires_in - 60
@@ -286,24 +290,24 @@ def get_request_result(request_id):
 
                 cnjs = achar_cnjs_no_objeto(data)
                 if cnjs:
-                    return {"success": True, "fallback_cnjs": cnjs}
+                    return {"success": True, "fallback_cnjs": cnjs, "raw": data}
 
             else:
                 cnjs = achar_cnjs_no_objeto(response.text)
                 if cnjs:
-                    return {"success": True, "fallback_cnjs": cnjs}
+                    return {"success": True, "fallback_cnjs": cnjs, "raw_text": response.text}
 
         except Exception:
             cnjs = achar_cnjs_no_objeto(ultimo_texto)
             if cnjs:
-                return {"success": True, "fallback_cnjs": cnjs}
+                return {"success": True, "fallback_cnjs": cnjs, "raw_text": ultimo_texto}
 
         time.sleep(4)
 
     cnjs = achar_cnjs_no_objeto(ultimo_texto)
 
     if cnjs:
-        return {"success": True, "fallback_cnjs": cnjs}
+        return {"success": True, "fallback_cnjs": cnjs, "raw_text": ultimo_texto}
 
     return {"success": False, "data": []}
 
@@ -351,6 +355,277 @@ def buscar_cnjs(valor, tipo):
     return processos_por_ano, uf, erros
 
 
+def criar_autorequest(cnj):
+    payload = {
+        "key": "cnj",
+        "value": cnj,
+        "makeDownload": False,
+        "callbacks": []
+    }
+
+    response = requests.post(
+        AUTOREQUEST_URL,
+        headers=codilo_headers(),
+        json=payload,
+        timeout=30
+    )
+
+    if response.status_code not in [200, 201]:
+        raise Exception(f"AutoRequest {response.status_code}: {response.text[:500]}")
+
+    data = response.json()
+
+    auto_id = (
+        data.get("data", {}).get("id")
+        or data.get("id")
+    )
+
+    requests_list = data.get("data", {}).get("requests", [])
+
+    if not auto_id:
+        raise Exception(f"AutoRequest sem ID: {data}")
+
+    return auto_id, requests_list
+
+
+def consultar_autorequest(auto_id):
+    url = f"{AUTOREQUEST_URL}/{auto_id}"
+
+    for _ in range(15):
+        response = requests.get(
+            url,
+            headers=codilo_headers(),
+            timeout=30
+        )
+
+        if response.status_code not in [200, 201]:
+            raise Exception(f"Show AutoRequest {response.status_code}: {response.text[:500]}")
+
+        data = response.json()
+        requests_list = data.get("data", {}).get("requests", [])
+
+        success_requests = [
+            r for r in requests_list
+            if str(r.get("status", "")).lower() == "success"
+        ]
+
+        if success_requests:
+            return success_requests
+
+        pending = [
+            r for r in requests_list
+            if str(r.get("status", "")).lower() == "pending"
+        ]
+
+        if not pending:
+            return requests_list
+
+        time.sleep(5)
+
+    return []
+
+
+def get_any(obj, keys, default="Não informado"):
+    if not isinstance(obj, dict):
+        return default
+
+    for key in keys:
+        value = obj.get(key)
+
+        if value not in [None, "", [], {}]:
+            return value
+
+    return default
+
+
+def normalizar_nome(pessoa):
+    if isinstance(pessoa, str):
+        return pessoa
+
+    if not isinstance(pessoa, dict):
+        return "Não informado"
+
+    return (
+        pessoa.get("name")
+        or pessoa.get("nome")
+        or pessoa.get("value")
+        or pessoa.get("description")
+        or pessoa.get("label")
+        or pessoa.get("document")
+        or "Não informado"
+    )
+
+
+def extrair_pessoas(processo):
+    pessoas = (
+        processo.get("people")
+        or processo.get("partes")
+        or processo.get("persons")
+        or processo.get("parties")
+        or processo.get("envolvidos")
+        or []
+    )
+
+    autores = []
+    reus = []
+    advogados = []
+
+    for pessoa in pessoas:
+        if not isinstance(pessoa, dict):
+            continue
+
+        nome = normalizar_nome(pessoa)
+
+        tipo = " ".join([
+            str(pessoa.get("type", "")),
+            str(pessoa.get("role", "")),
+            str(pessoa.get("side", "")),
+            str(pessoa.get("qualifier", "")),
+            str(pessoa.get("description", "")),
+            str(pessoa.get("kind", "")),
+        ]).lower()
+
+        if "adv" in tipo or "lawyer" in tipo:
+            advogados.append(nome)
+        elif "autor" in tipo or "requerente" in tipo or "exequente" in tipo or "active" in tipo or "parte ativa" in tipo:
+            autores.append(nome)
+        elif "réu" in tipo or "reu" in tipo or "requerido" in tipo or "executado" in tipo or "passive" in tipo or "parte passiva" in tipo:
+            reus.append(nome)
+
+        for adv in pessoa.get("lawyers", []) or pessoa.get("advogados", []):
+            advogados.append(normalizar_nome(adv))
+
+    return {
+        "autor": autores[0] if autores else "Não informado",
+        "reu": reus[0] if reus else "Não informado",
+        "advogado": advogados[0] if advogados else "Não informado"
+    }
+
+
+def extrair_lista_processos(resultado):
+    data = resultado.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for chave in [
+            "items",
+            "processes",
+            "processos",
+            "result",
+            "results",
+            "lawsuits",
+            "records"
+        ]:
+            if isinstance(data.get(chave), list):
+                return data.get(chave)
+
+        if data.get("properties") or data.get("people") or data.get("number"):
+            return [data]
+
+    return []
+
+
+def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
+    props = processo.get("properties") or processo.get("capa") or processo.get("cover") or processo
+    pessoas = extrair_pessoas(processo)
+
+    numero = cnj_forcado or get_any(
+        props,
+        ["number", "cnj", "numero", "numeroProcesso", "processo", "processNumber"]
+    )
+
+    tribunal = get_any(
+        props,
+        ["court", "tribunal", "search", "tribunalNome"],
+        fallback_tribunal
+    )
+
+    origem = get_any(
+        props,
+        ["origin", "origem", "foro", "comarca", "vara"],
+        "Não informado"
+    )
+
+    assunto = get_any(
+        props,
+        ["subject", "assunto", "area", "classe", "class", "nature"],
+        "Não informado"
+    )
+
+    valor = get_any(
+        props,
+        ["value", "valor", "valorCausa", "valor_da_causa", "claimValue"],
+        "Não informado"
+    )
+
+    return (
+        f"Prezado Cliente!\n\n"
+        f"Autor: {pessoas['autor']}\n\n"
+        f"CPF: Não informado\n\n"
+        f"Réu: {pessoas['reu']}\n\n"
+        f"Assunto: {assunto}\n\n"
+        f"Tribunal: {tribunal} - {origem}\n\n"
+        f"Nº do processo: {numero}\n\n"
+        f"Valor da causa: {valor}\n\n"
+        f"Advogado: {pessoas['advogado']}"
+    )
+
+
+def buscar_detalhes_autorequest(cnj):
+    auto_id, initial_requests = criar_autorequest(cnj)
+
+    success_requests = consultar_autorequest(auto_id)
+
+    if not success_requests:
+        success_requests = [
+            r for r in initial_requests
+            if str(r.get("status", "")).lower() == "success"
+        ]
+
+    if not success_requests:
+        return (
+            f"❌ Não consegui obter dados completos agora.\n\n"
+            f"Nº do processo: {cnj}\n"
+            f"AutoRequest ID: {auto_id}\n"
+            f"Status: sem requisição success ainda."
+        )
+
+    ultimo_erro = None
+
+    for req in success_requests:
+        request_id = req.get("id")
+        tribunal = req.get("court") or req.get("search") or "Não informado"
+
+        if not request_id:
+            continue
+
+        try:
+            resultado = get_request_result(request_id)
+            processos = extrair_lista_processos(resultado)
+
+            if processos:
+                return formatar_processo(
+                    processos[0],
+                    fallback_tribunal=tribunal,
+                    cnj_forcado=cnj
+                )
+
+            ultimo_erro = "Requisição success, mas sem lista de processos."
+
+        except Exception as e:
+            ultimo_erro = str(e)
+            continue
+
+    return (
+        f"❌ AutoRequest criada, mas não retornou capa completa.\n\n"
+        f"Nº do processo: {cnj}\n"
+        f"AutoRequest ID: {auto_id}\n"
+        f"Erro: {ultimo_erro or 'Não informado'}"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🇧🇷 ConsultaBot V6 Online\n\n"
@@ -358,7 +633,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/oab 123636--RS\n"
         "/nomeadv Nome do Advogado\n"
         "/nomeparte Nome da Parte\n\n"
-        "Depois da busca, escolha o ano pelos botões."
+        "Depois escolha o ano e clique em 🔎 Ver detalhes."
     )
 
 
@@ -464,33 +739,59 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     itens = list(processos_ano.values())
 
-    resposta = (
+    texto = (
         f"📂 Processos do ano {ano}\n"
         f"Total encontrado: {len(itens)}\n\n"
+        "Clique em 🔎 Ver detalhes para consultar a capa completa:"
     )
+
+    keyboard = []
 
     for i, item in enumerate(itens, start=1):
         cnj = item["cnj"]
         tribunal = item.get("tribunal", "Não informado")
 
-        resposta += (
-            f"========== {i} ==========\n"
-            f"Prezado Cliente!\n\n"
-            f"Autor: Não informado\n\n"
-            f"CPF: Não informado\n\n"
-            f"Réu: Não informado\n\n"
-            f"Assunto: Não informado\n\n"
-            f"Tribunal: {tribunal} - Não informado\n\n"
-            f"Nº do processo: {cnj}\n\n"
-            f"Valor da causa: Não informado\n\n"
-            f"Advogado: Não informado\n\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🔎 {i}. {cnj} | {tribunal}",
+                callback_data=f"detalhe:{cnj}"
+            )
+        ])
+
+    await query.edit_message_text(
+        texto,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def callback_detalhe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Consultando detalhes...")
+
+    data = query.data
+
+    if not data.startswith("detalhe:"):
+        return
+
+    cnj = data.split(":", 1)[1]
+
+    await query.edit_message_text(
+        f"🔎 Consultando detalhes do processo:\n{cnj}\n\nAguarde..."
+    )
+
+    try:
+        resposta = await asyncio.to_thread(buscar_detalhes_autorequest, cnj)
+    except Exception as e:
+        resposta = (
+            f"❌ Erro ao buscar detalhes.\n\n"
+            f"Nº do processo: {cnj}\n"
+            f"Erro: {str(e)[:500]}"
         )
 
-        if len(resposta) > 3800:
-            resposta += "\n⚠️ Resultado cortado pelo limite do Telegram."
-            break
-
-    await query.edit_message_text(resposta[:4000])
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=resposta[:4000]
+    )
 
 
 telegram_app.add_handler(CommandHandler("start", start))
@@ -498,6 +799,7 @@ telegram_app.add_handler(CommandHandler("oab", oab))
 telegram_app.add_handler(CommandHandler("nomeadv", nomeadv))
 telegram_app.add_handler(CommandHandler("nomeparte", nomeparte))
 telegram_app.add_handler(CallbackQueryHandler(callback_ano, pattern=r"^abrir_ano:"))
+telegram_app.add_handler(CallbackQueryHandler(callback_detalhe, pattern=r"^detalhe:"))
 
 
 @app.post("/webhook")
@@ -510,7 +812,7 @@ async def webhook(req: Request):
 
 @app.get("/")
 def home():
-    return {"status": "ConsultaBot V6 Online"}
+    return {"status": "ConsultaBot V6 AutoRequest Online"}
 
 
 @app.on_event("startup")
