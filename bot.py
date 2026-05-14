@@ -28,34 +28,28 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 # =========================================================
 
 TRIBUNAIS = [
-    # RIO GRANDE DO SUL
     "tjrs",
     "trf4",
     "trt4",
 
-    # SANTA CATARINA
     "tjsc",
     "trt12",
 
-    # GOIÁS
     "tjgo",
     "trt18",
     "trf1",
 
-    # TOCANTINS
     "tjto",
 
-    # DISTRITO FEDERAL
     "tjdft",
     "trt10",
 
-    # MINAS GERAIS
     "tjmg",
     "trt3"
 ]
 
 # =========================================================
-# TOKEN OAUTH2 CODILO
+# TOKEN CODILO
 # =========================================================
 
 def gerar_token():
@@ -84,12 +78,15 @@ def gerar_token():
     return data.get("access_token")
 
 # =========================================================
-# CONSULTA POR ADVOGADO
+# CONSULTA ADVOGADO
 # =========================================================
 
 def consultar_advogado(nome_advogado):
 
     token = gerar_token()
+
+    if not token:
+        return ["❌ Erro ao autenticar na Codilo."]
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -140,8 +137,9 @@ def consultar_advogado(nome_advogado):
                 reu = p.get("reu", "Não informado")
                 advogado = p.get("advogado", nome_advogado)
 
-                resultados.append(
-                    f"""
+                texto = f"""
+📌 *PROCESSO ENCONTRADO*
+
 *Autor:* {autor}
 
 *Réu:* {reu}
@@ -150,14 +148,18 @@ def consultar_advogado(nome_advogado):
 
 *Tribunal:* {tribunal_nome}
 
-*Nº do processo:* {numero}
+*Nº do processo:* `{numero}`
 
 *Advogado:* {advogado}
 """
-                )
+
+                resultados.append(texto)
 
         except:
             continue
+
+    if not resultados:
+        return ["❌ Nenhum processo encontrado."]
 
     return resultados
 
@@ -187,24 +189,20 @@ Comandos:
 async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
+
         await update.message.reply_text(
-            "Digite o nome do advogado."
+            "❌ Digite o nome do advogado."
         )
+
         return
 
     nome = " ".join(context.args)
 
     await update.message.reply_text(
-        "🔎 Consultando advogado em tribunais filtrados..."
+        "🔎 Consultando advogado nos tribunais filtrados..."
     )
 
     resultados = consultar_advogado(nome)
-
-    if not resultados:
-        await update.message.reply_text(
-            "❌ Nenhum processo encontrado."
-        )
-        return
 
     resposta = "\n━━━━━━━━━━━━━━━\n".join(resultados[:20])
 
@@ -237,19 +235,35 @@ async def home():
     return {"status": "ConsultaBot Brasil online"}
 
 # =========================================================
-# INICIALIZAÇÃO
+# STARTUP
 # =========================================================
 
-@telegram_app.post_init
-async def post_init(app_telegram):
+@app.on_event("startup")
+async def startup():
+
+    await telegram_app.initialize()
 
     webhook_url = f"{RENDER_URL}/"
 
-    await app_telegram.bot.set_webhook(webhook_url)
+    await telegram_app.bot.set_webhook(webhook_url)
+
+# =========================================================
+# SHUTDOWN
+# =========================================================
+
+@app.on_event("shutdown")
+async def shutdown():
+
+    await telegram_app.shutdown()
 
 # =========================================================
 # HANDLERS
 # =========================================================
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("nomeadv", nomeadv))
+telegram_app.add_handler(
+    CommandHandler("start", start)
+)
+
+telegram_app.add_handler(
+    CommandHandler("nomeadv", nomeadv)
+)
