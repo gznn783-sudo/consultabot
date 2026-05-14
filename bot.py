@@ -1,7 +1,7 @@
 import os
 import time
-import requests
 import asyncio
+import requests
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -53,28 +53,26 @@ def get_codilo_token():
     )
 
     print("CODILO AUTH STATUS:", response.status_code)
-    print("CODILO AUTH RESPONSE:", response.text[:500])
+    print("CODILO AUTH RESPONSE:", response.text[:1000])
 
     response.raise_for_status()
 
     data = response.json()
+    token = data.get("access_token")
+    expires_in = int(float(data.get("expires_in", 3600)))
 
-    access_token = data.get("access_token")
-    expires_in = int(data.get("expires_in", 3600))
+    if not token:
+        raise Exception(f"Codilo não retornou access_token: {data}")
 
-    if not access_token:
-        raise Exception("Codilo não retornou access_token.")
-
-    TOKEN_CACHE["access_token"] = access_token
+    TOKEN_CACHE["access_token"] = token
     TOKEN_CACHE["expires_at"] = now + expires_in - 60
 
-    return access_token
+    return token
 
 
 def codilo_headers():
-    token = get_codilo_token()
     return {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {get_codilo_token()}",
         "Content-Type": "application/json",
         "accept": "*/*"
     }
@@ -93,7 +91,7 @@ def get_available():
     )
 
     print("CODILO AVAILABLE STATUS:", response.status_code)
-    print("CODILO AVAILABLE RESPONSE:", response.text[:500])
+    print("CODILO AVAILABLE RESPONSE:", response.text[:1000])
 
     response.raise_for_status()
 
@@ -105,38 +103,91 @@ def get_available():
     return data
 
 
-def find_queries(param_keys):
-    available = get_available()
-    results = []
+def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
+    if ctx is None:
+        ctx = {
+            "source": "courts",
+            "platform": None,
+            "search": None,
+            "query": None
+        }
 
-    for source_item in available:
-        source = source_item.get("source", "courts")
+    if saida is None:
+        saida = []
 
-        for platform_item in source_item.get("platforms", []):
-            platform = platform_item.get("platform")
+    if isinstance(node, list):
+        for item in node:
+            extrair_queries_disponiveis(item, param_keys, ctx.copy(), saida)
+        return saida
 
-            for search_item in platform_item.get("searches", []):
-                search = search_item.get("search")
+    if not isinstance(node, dict):
+        return saida
 
-                if search and search.lower() not in TRIBUNAIS_PERMITIDOS:
+    novo_ctx = ctx.copy()
+
+    for campo in ["source", "platform", "search", "query"]:
+        if node.get(campo):
+            novo_ctx[campo] = node.get(campo)
+
+    params = node.get("params") or node.get("parameters") or []
+
+    if isinstance(params, dict):
+        params = [params]
+
+    if params and novo_ctx.get("platform") and novo_ctx.get("search") and novo_ctx.get("query"):
+        search_lower = str(novo_ctx["search"]).lower()
+
+        if search_lower in TRIBUNAIS_PERMITIDOS:
+            for param in params:
+                if not isinstance(param, dict):
                     continue
 
-                for query_item in search_item.get("queries", []):
-                    query = query_item.get("query")
+                key = (
+                    param.get("tag")
+                    or param.get("key")
+                    or param.get("name")
+                    or param.get("param")
+                )
 
-                    for param in query_item.get("params", []):
-                        tag = param.get("tag") or param.get("key")
+                if key in param_keys:
+                    saida.append({
+                        "source": novo_ctx.get("source") or "courts",
+                        "platform": novo_ctx["platform"],
+                        "search": novo_ctx["search"],
+                        "query": novo_ctx["query"],
+                        "param_key": key
+                    })
 
-                        if tag in param_keys:
-                            results.append({
-                                "source": source,
-                                "platform": platform,
-                                "search": search,
-                                "query": query,
-                                "param_key": tag
-                            })
+    for key, value in node.items():
+        if key in ["params", "parameters"]:
+            continue
+        if isinstance(value, (dict, list)):
+            extrair_queries_disponiveis(value, param_keys, novo_ctx.copy(), saida)
 
-    return results[:MAX_CODILO_REQUESTS]
+    return saida
+
+
+def find_queries(param_keys):
+    available = get_available()
+    consultas = extrair_queries_disponiveis(available, param_keys)
+
+    unicas = []
+    vistos = set()
+
+    for c in consultas:
+        chave = (
+            c["source"],
+            c["platform"],
+            c["search"],
+            c["query"],
+            c["param_key"]
+        )
+
+        if chave not in vistos:
+            vistos.add(chave)
+            unicas.append(c)
+
+    return unicas[:MAX_CODILO_REQUESTS]
 
 
 def create_request(item, value):
@@ -160,24 +211,31 @@ def create_request(item, value):
         timeout=30
     )
 
+    print("CODILO CREATE PAYLOAD:", payload)
     print("CODILO CREATE STATUS:", response.status_code)
-    print("CODILO CREATE RESPONSE:", response.text[:500])
+    print("CODILO CREATE RESPONSE:", response.text[:1000])
 
-    response.raise_for_status()
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Create {response.status_code}: {response.text[:500]}")
 
     data = response.json()
 
-    return (
-        data.get("requestId")
+    request_id = (
+        data.get("data", {}).get("id")
+        or data.get("requestId")
         or data.get("id")
-        or data.get("data", {}).get("id")
     )
+
+    if not request_id:
+        raise Exception(f"Sem request id: {data}")
+
+    return request_id
 
 
 def get_request_result(request_id):
     url = f"{REQUEST_URL}/{request_id}"
 
-    for _ in range(10):
+    for _ in range(12):
         response = requests.get(
             url,
             headers=codilo_headers(),
@@ -185,23 +243,26 @@ def get_request_result(request_id):
         )
 
         print("CODILO RESULT STATUS:", response.status_code)
-        print("CODILO RESULT RESPONSE:", response.text[:500])
+        print("CODILO RESULT RESPONSE:", response.text[:1000])
 
-        response.raise_for_status()
+        if response.status_code not in [200, 201]:
+            raise Exception(f"Result {response.status_code}: {response.text[:500]}")
 
         data = response.json()
 
         status = (
-            data.get("status")
+            data.get("requested", {}).get("status")
             or data.get("data", {}).get("status")
-            or data.get("requested", {}).get("status")
+            or data.get("status")
             or ""
         )
 
-        if status.lower() not in ["pending", "processing", "created"]:
+        status = str(status).lower()
+
+        if status not in ["pending", "processing", "created"]:
             return data
 
-        time.sleep(4)
+        time.sleep(5)
 
     return {"success": False, "status": "timeout", "data": []}
 
@@ -239,6 +300,7 @@ def extrair_pessoas(processo):
         processo.get("people")
         or processo.get("partes")
         or processo.get("persons")
+        or processo.get("parties")
         or []
     )
 
@@ -275,6 +337,23 @@ def extrair_pessoas(processo):
         "reu": reus[0] if reus else "Não informado",
         "advogado": advogados[0] if advogados else "Não informado"
     }
+
+
+def extrair_lista_processos(resultado):
+    data = resultado.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for chave in ["items", "processes", "processos", "result", "results"]:
+            if isinstance(data.get(chave), list):
+                return data.get(chave)
+
+        if data.get("properties") or data.get("people"):
+            return [data]
+
+    return []
 
 
 def formatar_processo(processo, fallback_tribunal="Não informado"):
@@ -316,34 +395,22 @@ def executar_busca(valor, tipo):
         return f"❌ Erro ao buscar abrangência da Codilo:\n{str(e)}"
 
     if not consultas:
-        return "❌ Nenhum tribunal filtrado disponível para esse tipo de busca."
+        return (
+            "❌ Nenhum tribunal filtrado disponível para esse tipo de busca.\n\n"
+            "Tente outro comando, como /oab ou /nomeparte."
+        )
 
     processos_unicos = {}
-    falhas = 0
+    erros = []
 
     for item in consultas:
         try:
             request_id = create_request(item, valor)
-
-            if not request_id:
-                falhas += 1
-                continue
-
             resultado = get_request_result(request_id)
 
-            data = resultado.get("data", [])
+            processos = extrair_lista_processos(resultado)
 
-            if isinstance(data, dict):
-                if "items" in data:
-                    data = data.get("items", [])
-                elif "processes" in data:
-                    data = data.get("processes", [])
-                elif "result" in data:
-                    data = data.get("result", [])
-                else:
-                    data = [data]
-
-            for processo in data:
+            for processo in processos:
                 if not isinstance(processo, dict):
                     continue
 
@@ -358,7 +425,7 @@ def executar_busca(valor, tipo):
                 )
 
                 if not numero:
-                    continue
+                    numero = f"sem-numero-{len(processos_unicos) + 1}"
 
                 if numero not in processos_unicos:
                     processos_unicos[numero] = {
@@ -367,15 +434,16 @@ def executar_busca(valor, tipo):
                     }
 
         except Exception as e:
-            print("ERRO CONSULTA CODILO:", str(e))
-            falhas += 1
+            erros.append(f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:180]}")
             continue
 
     if not processos_unicos:
+        erro_exemplo = "\n".join(erros[:5]) if erros else "Sem erro detalhado."
         return (
             "❌ Nenhum processo encontrado.\n\n"
             f"Consultas tentadas: {len(consultas)}\n"
-            f"Falhas/sem retorno: {falhas}"
+            f"Falhas/sem retorno: {len(erros)}\n\n"
+            f"Primeiros erros:\n{erro_exemplo}"
         )
 
     resposta = (
@@ -401,8 +469,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Comandos:\n"
         "/nomeadv Nome do Advogado\n"
         "/oab 12345-RS\n"
-        "/nomeparte Nome da Parte"
+        "/nomeparte Nome da Parte\n"
+        "/debugcodilo"
     )
+
+
+async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        token = get_codilo_token()
+        available = get_available()
+
+        nomeadv_q = find_queries(["nomeadv", "nomeadvogado"])
+        oab_q = find_queries(["oab"])
+        parte_q = find_queries(["nomeparte", "nome"])
+
+        await update.message.reply_text(
+            "✅ Codilo conectada.\n\n"
+            f"Token: {'OK' if token else 'Falhou'}\n"
+            f"Abrangência recebida: {len(available)} itens\n"
+            f"Consultas nomeadv filtradas: {len(nomeadv_q)}\n"
+            f"Consultas OAB filtradas: {len(oab_q)}\n"
+            f"Consultas nomeparte filtradas: {len(parte_q)}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Debug Codilo erro:\n{str(e)}")
 
 
 async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,6 +532,7 @@ async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("debugcodilo", debugcodilo))
 telegram_app.add_handler(CommandHandler("nomeadv", nomeadv))
 telegram_app.add_handler(CommandHandler("oab", oab))
 telegram_app.add_handler(CommandHandler("nomeparte", nomeparte))
