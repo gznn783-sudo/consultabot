@@ -1,9 +1,5 @@
-# ===============================
-# CONSULTABOT BRASIL V5 PROFISSIONAL
-# Render + Telegram + Anti Bloqueio JusBrasil
-# ===============================
-
 import os
+import re
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
@@ -15,123 +11,169 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-import uvicorn
-import asyncio
-import random
 
-# ===============================
+# =========================================
 # CONFIG
-# ===============================
+# =========================================
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_URL = os.getenv("RENDER_URL")
 
 app = FastAPI()
 
-# ===============================
-# TELEGRAM APP
-# ===============================
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-telegram_app = Application.builder().token(TOKEN).build()
+# =========================================
+# HEADERS ANTI BLOQUEIO
+# =========================================
 
-# ===============================
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
+
+# =========================================
 # START
-# ===============================
+# =========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🇧🇷 ConsultaBot Brasil V5 Online\n\n"
-        "Envie:\n"
-        "• Nome completo\n"
-        "• CPF\n"
-        "• Processo\n"
+    texto = (
+        "🔥 CONSULTABOT V6 BLACK EDITION 🔥\n\n"
+        "✅ Consulta por nome\n"
+        "✅ Busca processos públicos\n"
+        "✅ Sistema online\n\n"
+        "Envie o nome completo da pessoa."
     )
 
-telegram_app.add_handler(CommandHandler("start", start))
+    await update.message.reply_text(texto)
 
-# ===============================
-# USER AGENTS
-# ===============================
+# =========================================
+# CONSULTA
+# =========================================
 
-USER_AGENTS = [
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-    "Mozilla/5.0 (Linux; Android 13)",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-]
+async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-# ===============================
-# CONSULTA JUSBRASIL
-# ===============================
+    nome = update.message.text.strip()
 
-def consultar_jusbrasil(texto):
-    url = f"https://www.jusbrasil.com.br/busca?q={texto}"
+    if len(nome) < 4:
+        await update.message.reply_text(
+            "❌ Digite um nome válido."
+        )
+        return
 
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept-Language": "pt-BR,pt;q=0.9",
-        "Referer": "https://www.google.com/",
-        "Accept": "text/html",
-    }
+    mensagem = await update.message.reply_text(
+        "🔎 Consultando processos..."
+    )
+
+    resultado = buscar_google_jusbrasil(nome)
+
+    await mensagem.edit_text(resultado)
+
+# =========================================
+# GOOGLE + JUSBRASIL
+# =========================================
+
+def buscar_google_jusbrasil(nome):
 
     try:
-        r = requests.get(
+
+        busca = nome.replace(" ", "+")
+
+        url = (
+            f"https://www.google.com/search?q="
+            f"site%3Ajusbrasil.com.br+{busca}"
+        )
+
+        response = requests.get(
             url,
-            headers=headers,
+            headers=HEADERS,
             timeout=20
         )
 
-        if r.status_code != 200:
-            return "❌ JusBrasil bloqueou acesso."
+        if response.status_code != 200:
+            return "❌ Google bloqueou a consulta."
 
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(response.text, "lxml")
 
-        textos = soup.get_text("\n", strip=True)
+        html = soup.get_text(" ")
 
-        if "processo" in textos.lower():
-            return textos[:3500]
-
-        return "❌ Nenhum resultado encontrado."
-
-    except Exception as e:
-        return f"❌ Erro consulta: {str(e)}"
-
-# ===============================
-# MSG
-# ===============================
-
-async def receber(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text.strip()
-
-    await update.message.reply_text("🔎 Consultando...")
-
-    resultado = await asyncio.to_thread(
-        consultar_jusbrasil,
-        texto
-    )
-
-    await update.message.reply_text(resultado)
-
-telegram_app.add_handler(
-    MessageHandler(filters.TEXT & ~filters.COMMAND, receber)
-)
-
-# ===============================
-# WEBHOOK
-# ===============================
-
-@app.on_event("startup")
-async def startup():
-    await telegram_app.initialize()
-    await telegram_app.start()
-
-    if RENDER_URL:
-        await telegram_app.bot.set_webhook(
-            url=f"{RENDER_URL}/webhook"
+        links = re.findall(
+            r'https://www\.jusbrasil\.com\.br[^\s]+',
+            response.text
         )
 
-@app.post("/webhook")
-async def webhook(req: Request):
-    data = await req.json()
+        numeros = re.findall(
+            r'\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}',
+            html
+        )
+
+        tribunais = re.findall(
+            r'TJSP|TJRS|TJMG|TRF1|TRF3|TRF4|TRT',
+            html
+        )
+
+        resposta = (
+            f"🔥 CONSULTABOT V6 🔥\n\n"
+            f"👤 Nome: {nome}\n\n"
+        )
+
+        usados = set()
+
+        contador = 1
+
+        if numeros:
+
+            for numero in numeros[:10]:
+
+                if numero in usados:
+                    continue
+
+                usados.add(numero)
+
+                tribunal = (
+                    tribunais[contador - 1]
+                    if len(tribunais) >= contador
+                    else "Não informado"
+                )
+
+                resposta += (
+                    f"{contador}️⃣ Processo:\n"
+                    f"{numero}\n"
+                    f"🏛 Tribunal: {tribunal}\n\n"
+                )
+
+                contador += 1
+
+        if links:
+
+            resposta += "🔗 Links encontrados:\n\n"
+
+            for link in links[:5]:
+                resposta += f"{link}\n\n"
+
+        if not numeros and not links:
+            return (
+                "❌ Nenhum resultado encontrado.\n\n"
+                "⚠️ O Google/JusBrasil pode ter limitado "
+                "a busca temporariamente."
+            )
+
+        return resposta[:4000]
+
+    except Exception as e:
+        return f"❌ Erro na consulta:\n{str(e)}"
+
+# =========================================
+# WEBHOOK
+# =========================================
+
+@app.post("/")
+async def webhook(request: Request):
+
+    data = await request.json()
 
     update = Update.de_json(
         data,
@@ -142,21 +184,44 @@ async def webhook(req: Request):
 
     return {"ok": True}
 
+# =========================================
+# HOME
+# =========================================
+
 @app.get("/")
-def home():
+async def home():
     return {
-        "status": "ConsultaBot Brasil V5 Online"
+        "status": "CONSULTABOT V6 BLACK EDITION ONLINE"
     }
 
-# ===============================
-# MAIN
-# ===============================
+# =========================================
+# STARTUP
+# =========================================
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+@app.on_event("startup")
+async def startup():
 
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port
+    telegram_app.add_handler(
+        CommandHandler("start", start)
     )
+
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            consultar
+        )
+    )
+
+    await telegram_app.initialize()
+
+    await telegram_app.bot.set_webhook(
+        url=RENDER_URL
+    )
+
+# =========================================
+# SHUTDOWN
+# =========================================
+
+@app.on_event("shutdown")
+async def shutdown():
+    await telegram_app.shutdown()
