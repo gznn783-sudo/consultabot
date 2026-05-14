@@ -20,15 +20,8 @@ REQUEST_URL = "https://api.consulta.codilo.com.br/v1/request"
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-TOKEN_CACHE = {
-    "access_token": None,
-    "expires_at": 0
-}
-
-AVAILABLE_CACHE = {
-    "data": None,
-    "expires_at": 0
-}
+TOKEN_CACHE = {"access_token": None, "expires_at": 0}
+AVAILABLE_CACHE = {"data": None, "expires_at": 0}
 
 TRIBUNAIS_PERMITIDOS = {
     "tjrs", "trf4", "trt4",
@@ -67,7 +60,7 @@ def get_codilo_token():
     data = response.json()
 
     access_token = data.get("access_token")
-    expires_in = data.get("expires_in", 3600)
+    expires_in = int(data.get("expires_in", 3600))
 
     if not access_token:
         raise Exception("Codilo não retornou access_token.")
@@ -80,7 +73,6 @@ def get_codilo_token():
 
 def codilo_headers():
     token = get_codilo_token()
-
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -220,7 +212,6 @@ def get_any(obj, keys, default="Não informado"):
 
     for key in keys:
         value = obj.get(key)
-
         if value not in [None, "", [], {}]:
             return value
 
@@ -287,12 +278,7 @@ def extrair_pessoas(processo):
 
 
 def formatar_processo(processo, fallback_tribunal="Não informado"):
-    props = (
-        processo.get("properties")
-        or processo.get("capa")
-        or processo
-    )
-
+    props = processo.get("properties") or processo.get("capa") or processo
     pessoas = extrair_pessoas(processo)
 
     numero = get_any(props, ["number", "cnj", "numero", "numeroProcesso", "processo"])
@@ -427,9 +413,7 @@ async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("🔎 Consultando advogado nos tribunais filtrados...")
-
     resultado = await asyncio.to_thread(executar_busca, valor, "nomeadv")
-
     await msg.edit_text(resultado)
 
 
@@ -441,9 +425,7 @@ async def oab(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("🔎 Consultando OAB nos tribunais filtrados...")
-
     resultado = await asyncio.to_thread(executar_busca, valor, "oab")
-
     await msg.edit_text(resultado)
 
 
@@ -455,9 +437,7 @@ async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("🔎 Consultando parte nos tribunais filtrados...")
-
     resultado = await asyncio.to_thread(executar_busca, valor, "nomeparte")
-
     await msg.edit_text(resultado)
 
 
