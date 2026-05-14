@@ -96,6 +96,7 @@ def get_available():
     response.raise_for_status()
 
     data = response.json().get("data", [])
+
     AVAILABLE_CACHE["data"] = data
     AVAILABLE_CACHE["expires_at"] = now + 3600
 
@@ -117,16 +118,26 @@ def extrair_uf_oab(valor):
 
 
 def extrair_ano_cnj(cnj):
-    match = re.search(r"\.\d{4}\.", cnj)
-    if not match:
-        return "Sem ano"
+    match = re.search(r"\.(\d{4})\.", cnj)
+    if match:
+        return match.group(1)
 
-    return match.group(0).replace(".", "")
+    return "Sem ano"
+
+
+def achar_cnjs_no_objeto(obj):
+    texto = str(obj)
+    return list(set(re.findall(CNJ_REGEX, texto)))
 
 
 def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
     if ctx is None:
-        ctx = {"source": "courts", "platform": None, "search": None, "query": None}
+        ctx = {
+            "source": "courts",
+            "platform": None,
+            "search": None,
+            "query": None
+        }
 
     if saida is None:
         saida = []
@@ -155,7 +166,12 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
             if not isinstance(param, dict):
                 continue
 
-            key = param.get("tag") or param.get("key") or param.get("name") or param.get("param")
+            key = (
+                param.get("tag")
+                or param.get("key")
+                or param.get("name")
+                or param.get("param")
+            )
 
             if key in param_keys:
                 saida.append({
@@ -189,8 +205,10 @@ def ordenar_por_uf(consultas, uf=None):
 
     def score(item):
         search = str(item.get("search", "")).lower()
+
         if search in prioridade:
             return prioridade.index(search)
+
         return 999
 
     if filtradas:
@@ -207,7 +225,13 @@ def find_queries(param_keys, uf=None):
     vistos = set()
 
     for c in consultas:
-        chave = (c["source"], c["platform"], c["search"], c["query"], c["param_key"])
+        chave = (
+            c["source"],
+            c["platform"],
+            c["search"],
+            c["query"],
+            c["param_key"]
+        )
 
         if chave not in vistos:
             vistos.add(chave)
@@ -239,6 +263,10 @@ def create_request(item, value):
         timeout=30
     )
 
+    print("CODILO CREATE PAYLOAD:", payload)
+    print("CODILO CREATE STATUS:", response.status_code)
+    print("CODILO CREATE RESPONSE:", response.text[:1500])
+
     if response.status_code not in [200, 201]:
         raise Exception(f"Create {response.status_code}: {response.text[:500]}")
 
@@ -259,58 +287,87 @@ def create_request(item, value):
 def get_request_result(request_id):
     url = f"{REQUEST_URL}/{request_id}"
 
+    ultimo_texto = ""
+
     for _ in range(15):
-        response = requests.get(
-            url,
-            headers=codilo_headers(),
-            timeout=30
-        )
+        try:
+            response = requests.get(
+                url,
+                headers=codilo_headers(),
+                timeout=30
+            )
 
-        if response.status_code not in [200, 201]:
-            raise Exception(f"Result {response.status_code}: {response.text[:500]}")
+            ultimo_texto = response.text
 
-        data = response.json()
+            print("CODILO RESULT STATUS:", response.status_code)
+            print("CODILO RESULT RESPONSE:", response.text[:2000])
 
-        status = (
-            data.get("requested", {}).get("status")
-            or data.get("data", {}).get("status")
-            or data.get("status")
-            or ""
-        )
+            if response.status_code in [200, 201]:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {"raw_text": response.text}
 
-        status = str(status).lower()
+                status = (
+                    data.get("requested", {}).get("status")
+                    or data.get("data", {}).get("status")
+                    or data.get("status")
+                    or ""
+                )
 
-        if status in ["success", "warning", "done", "finished", "completed"]:
-            return data
+                status = str(status).lower()
 
-        if status in ["error", "failed", "failure"]:
-            raise Exception(f"Consulta falhou: {str(data)[:500]}")
+                if status in ["success", "warning", "done", "finished", "completed"]:
+                    return data
 
-        time.sleep(6)
+                if status in ["error", "failed", "failure"]:
+                    cnjs = achar_cnjs_no_objeto(data)
 
-    return {"success": False, "status": "timeout", "data": []}
+                    if cnjs:
+                        return {
+                            "success": True,
+                            "fallback_cnjs": cnjs,
+                            "raw": data
+                        }
 
+            else:
+                cnjs = achar_cnjs_no_objeto(response.text)
 
-def achar_cnjs_no_objeto(obj):
-    texto = str(obj)
-    return list(set(re.findall(CNJ_REGEX, texto)))
+                if cnjs:
+                    return {
+                        "success": True,
+                        "fallback_cnjs": cnjs,
+                        "raw_text": response.text
+                    }
 
+        except Exception as e:
+            print("ERRO GET RESULT:", str(e))
 
-def extrair_lista_processos(resultado):
-    data = resultado.get("data", [])
+            cnjs = achar_cnjs_no_objeto(ultimo_texto)
 
-    if isinstance(data, list):
-        return data
+            if cnjs:
+                return {
+                    "success": True,
+                    "fallback_cnjs": cnjs,
+                    "raw_text": ultimo_texto
+                }
 
-    if isinstance(data, dict):
-        for chave in ["items", "processes", "processos", "result", "results", "lawsuits", "records"]:
-            if isinstance(data.get(chave), list):
-                return data.get(chave)
+        time.sleep(4)
 
-        if data.get("properties") or data.get("people") or data.get("number"):
-            return [data]
+    cnjs = achar_cnjs_no_objeto(ultimo_texto)
 
-    return []
+    if cnjs:
+        return {
+            "success": True,
+            "fallback_cnjs": cnjs,
+            "raw_text": ultimo_texto
+        }
+
+    return {
+        "success": False,
+        "status": "timeout",
+        "data": []
+    }
 
 
 def get_any(obj, keys, default="Não informado"):
@@ -319,6 +376,7 @@ def get_any(obj, keys, default="Não informado"):
 
     for key in keys:
         value = obj.get(key)
+
         if value not in [None, "", [], {}]:
             return value
 
@@ -373,9 +431,24 @@ def extrair_pessoas(processo):
 
         if "adv" in tipo or "lawyer" in tipo:
             advogados.append(nome)
-        elif "autor" in tipo or "requerente" in tipo or "exequente" in tipo or "active" in tipo:
+
+        elif (
+            "autor" in tipo
+            or "requerente" in tipo
+            or "exequente" in tipo
+            or "active" in tipo
+            or "parte ativa" in tipo
+        ):
             autores.append(nome)
-        elif "réu" in tipo or "reu" in tipo or "requerido" in tipo or "executado" in tipo or "passive" in tipo:
+
+        elif (
+            "réu" in tipo
+            or "reu" in tipo
+            or "requerido" in tipo
+            or "executado" in tipo
+            or "passive" in tipo
+            or "parte passiva" in tipo
+        ):
             reus.append(nome)
 
         for adv in pessoa.get("lawyers", []) or pessoa.get("advogados", []):
@@ -388,8 +461,39 @@ def extrair_pessoas(processo):
     }
 
 
+def extrair_lista_processos(resultado):
+    data = resultado.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for chave in [
+            "items",
+            "processes",
+            "processos",
+            "result",
+            "results",
+            "lawsuits",
+            "records"
+        ]:
+            if isinstance(data.get(chave), list):
+                return data.get(chave)
+
+        if data.get("properties") or data.get("people") or data.get("number"):
+            return [data]
+
+    return []
+
+
 def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
-    props = processo.get("properties") or processo.get("capa") or processo.get("cover") or processo
+    props = (
+        processo.get("properties")
+        or processo.get("capa")
+        or processo.get("cover")
+        or processo
+    )
+
     pessoas = extrair_pessoas(processo)
 
     numero = cnj_forcado or get_any(
@@ -439,11 +543,14 @@ def buscar_cnjs(valor, tipo):
 
     if tipo == "nomeadv":
         param_keys = ["nomeadv", "nomeadvogado", "advogado"]
+
     elif tipo == "oab":
         param_keys = ["oab"]
         uf = extrair_uf_oab(valor)
+
     elif tipo == "nomeparte":
         param_keys = ["nomeparte", "nome"]
+
     else:
         return {}, uf, []
 
@@ -457,19 +564,28 @@ def buscar_cnjs(valor, tipo):
             request_id = create_request(item, valor)
             resultado = get_request_result(request_id)
 
-            cnjs = achar_cnjs_no_objeto(resultado)
+            cnjs = []
+
+            if isinstance(resultado, dict) and resultado.get("fallback_cnjs"):
+                cnjs = resultado.get("fallback_cnjs", [])
+            else:
+                cnjs = achar_cnjs_no_objeto(resultado)
 
             for cnj in cnjs:
                 ano = extrair_ano_cnj(cnj)
 
                 processos_por_ano.setdefault(ano, {})
+
                 processos_por_ano[ano][cnj] = {
                     "cnj": cnj,
                     "tribunal": item.get("search", "Não informado")
                 }
 
         except Exception as e:
-            erros.append(f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:160]}")
+            erros.append(
+                f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:180]}"
+            )
+            continue
 
     return processos_por_ano, uf, erros
 
@@ -482,6 +598,7 @@ def buscar_detalhes_por_cnj(cnj, tribunal_preferido=None):
             c for c in consultas
             if str(c.get("search", "")).lower() == str(tribunal_preferido).lower()
         ]
+
         if preferidas:
             consultas = preferidas + [c for c in consultas if c not in preferidas]
 
@@ -495,8 +612,12 @@ def buscar_detalhes_por_cnj(cnj, tribunal_preferido=None):
                 return processos[0], item.get("search", tribunal_preferido or "Não informado")
 
             cnjs = achar_cnjs_no_objeto(resultado)
+
             if cnj in cnjs:
-                return {"properties": {"number": cnj}, "people": []}, item.get("search", tribunal_preferido or "Não informado")
+                return {"properties": {"number": cnj}, "people": []}, item.get(
+                    "search",
+                    tribunal_preferido or "Não informado"
+                )
 
         except Exception:
             continue
@@ -526,18 +647,21 @@ async def executar_busca_com_botoes(update: Update, context: ContextTypes.DEFAUL
 
     try:
         processos_por_ano, uf, erros = await asyncio.to_thread(buscar_cnjs, valor, tipo)
+
     except Exception as e:
         await msg.edit_text(f"❌ Erro na busca:\n{str(e)}")
         return
 
     if not processos_por_ano:
         erro_exemplo = "\n".join(erros[:6]) if erros else "Sem erro detalhado."
+
         await msg.edit_text(
             "❌ Nenhum processo encontrado.\n\n"
             f"UF detectada: {uf or 'Não detectada'}\n"
             f"Falhas/sem retorno: {len(erros)}\n\n"
             f"Primeiros erros:\n{erro_exemplo}"
         )
+
         return
 
     user_id = update.effective_user.id
@@ -556,6 +680,7 @@ async def executar_busca_com_botoes(update: Update, context: ContextTypes.DEFAUL
 
     for ano in anos:
         qtd = len(processos_por_ano[ano])
+
         keyboard.append([
             InlineKeyboardButton(
                 f"📂 Processos {ano} ({qtd})",
@@ -592,6 +717,7 @@ async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+
     await query.answer()
 
     user_id = query.from_user.id
@@ -693,8 +819,11 @@ telegram_app.add_handler(CallbackQueryHandler(callback_ano, pattern=r"^ano:"))
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
+
     update = Update.de_json(data, telegram_app.bot)
+
     await telegram_app.process_update(update)
+
     return {"ok": True}
 
 
