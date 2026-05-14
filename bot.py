@@ -1,12 +1,14 @@
 import os
 import re
-import asyncio
+import requests
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from playwright.async_api import async_playwright
-
+# =========================
+# CONFIG
+# =========================
 TOKEN = os.getenv("TOKEN")
 RENDER_URL = os.getenv("RENDER_URL")
 
@@ -15,89 +17,87 @@ app = FastAPI()
 telegram_app = Application.builder().token(TOKEN).build()
 
 
+# =========================
 # START
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 ConsultaBot V3 REAL Online\n\n"
-        "Use:\n"
-        "/buscar Nome Completo\n\n"
-        "Ou envie apenas o nome da pessoa."
+        "🔎 ConsultaBot V4 PROFISSIONAL ONLINE\n\n"
+        "Envie o nome completo da pessoa para consultar processos."
     )
 
 
+# =========================
 # CONSULTA
+# =========================
 async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nome = update.message.text.strip()
+
+    msg = await update.message.reply_text("🔍 Consultando processos reais...")
+
+    resultado = buscar_processos(nome)
+
+    await msg.edit_text(resultado)
+
+
+# =========================
+# BUSCA REAL SEM PLAYWRIGHT
+# =========================
+def buscar_processos(nome):
     try:
-        if context.args:
-            nome = " ".join(context.args).strip()
-        else:
-            nome = update.message.text.strip()
+        busca = nome.replace(" ", "+")
 
-        if nome.lower() == "/buscar":
-            await update.message.reply_text("Digite assim:\n/buscar João Silva")
-            return
+        url = f"https://www.jusbrasil.com.br/busca?q={busca}"
 
-        msg = await update.message.reply_text("🔍 Consultando processos...")
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
 
-        resultado = await buscar_processos(nome)
+        response = requests.get(url, headers=headers, timeout=15)
 
-        await msg.edit_text(resultado)
+        if response.status_code != 200:
+            return "❌ Falha ao acessar JusBrasil."
 
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erro: {str(e)}")
+        html = response.text
 
+        soup = BeautifulSoup(html, "html.parser")
 
-# PLAYWRIGHT
-async def buscar_processos(nome):
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
+        texto = soup.get_text(" ", strip=True)
 
-            page = await browser.new_page()
-
-            busca = nome.replace(" ", "+")
-
-            url = f"https://www.jusbrasil.com.br/busca?q={busca}"
-
-            await page.goto(url, timeout=30000)
-
-            await page.wait_for_timeout(5000)
-
-            texto = await page.content()
-
-            await browser.close()
-
-        numeros = re.findall(
+        processos = re.findall(
             r'\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}',
             texto
         )
 
         tribunais = re.findall(
-            r'TJRS|TJSP|TJMG|TJRJ|TRF1|TRF3|TRF4|TRT',
+            r'TJSP|TJMG|TJRS|TJPR|TJSC|TRF1|TRF2|TRF3|TRF4|TRF5|TRT',
             texto
         )
 
-        if not numeros:
-            return f"❌ Nenhum processo encontrado para {nome}."
+        if not processos:
+            return f"❌ Nenhum processo encontrado para {nome}"
 
-        resposta = f"🔎 Resultados para {nome}\n\n"
+        resposta = f"🔎 Resultados para: {nome}\n\n"
 
         usados = set()
+
         contador = 1
 
-        for i, proc in enumerate(numeros):
+        for proc in processos:
             if proc in usados:
                 continue
 
             usados.add(proc)
 
-            tribunal = tribunais[i] if i < len(tribunais) else "Não informado"
+            tribunal = (
+                tribunais[contador - 1]
+                if len(tribunais) >= contador
+                else "Não informado"
+            )
 
             resposta += (
-                f"{contador}️⃣ Processo: {proc}\n"
+                f"{contador}️⃣ Processo:\n"
+                f"{proc}\n"
                 f"🏛 Tribunal: {tribunal}\n\n"
             )
 
@@ -112,7 +112,9 @@ async def buscar_processos(nome):
         return f"❌ Erro na consulta: {str(e)}"
 
 
-# WEBHOOK TELEGRAM
+# =========================
+# WEBHOOK
+# =========================
 @app.post("/")
 async def webhook(req: Request):
     data = await req.json()
@@ -121,25 +123,32 @@ async def webhook(req: Request):
     return {"ok": True}
 
 
-# HOME
+# =========================
+# STATUS
+# =========================
 @app.get("/")
 async def home():
-    return {"status": "ConsultaBot V3 REAL online"}
+    return {"status": "ConsultaBot V4 PROFISSIONAL ONLINE"}
 
 
+# =========================
 # STARTUP
+# =========================
 @app.on_event("startup")
 async def startup():
     telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("buscar", consultar))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consultar))
+    telegram_app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, consultar)
+    )
 
     await telegram_app.initialize()
 
     await telegram_app.bot.set_webhook(url=RENDER_URL)
 
 
+# =========================
 # SHUTDOWN
+# =========================
 @app.on_event("shutdown")
 async def shutdown():
     await telegram_app.shutdown()
