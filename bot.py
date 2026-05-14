@@ -4,8 +4,8 @@ import time
 import asyncio
 import requests
 from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
 RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
@@ -14,17 +14,18 @@ CODILO_KEY = os.getenv("CODILO_KEY")
 CODILO_SECRET = os.getenv("CODILO_SECRET")
 
 MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "80"))
+MAX_PROCESSOS_POR_ANO = int(os.getenv("MAX_PROCESSOS_POR_ANO", "20"))
 
 AUTH_URL = "https://auth.codilo.com.br/oauth/token"
 AVAILABLE_URL = "https://api.consulta.codilo.com.br/v1/available"
 REQUEST_URL = "https://api.consulta.codilo.com.br/v1/request"
-LIST_REQUEST_URL = "https://api.consulta.codilo.com.br/v1/request"
 
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 TOKEN_CACHE = {"access_token": None, "expires_at": 0}
 AVAILABLE_CACHE = {"data": None, "expires_at": 0}
+USER_RESULTS = {}
 
 CNJ_REGEX = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
 
@@ -56,9 +57,6 @@ def get_codilo_token():
         headers={"Content-Type": "application/json"},
         timeout=30
     )
-
-    print("CODILO AUTH STATUS:", response.status_code)
-    print("CODILO AUTH RESPONSE:", response.text[:1000])
 
     response.raise_for_status()
 
@@ -95,13 +93,9 @@ def get_available():
         timeout=30
     )
 
-    print("CODILO AVAILABLE STATUS:", response.status_code)
-    print("CODILO AVAILABLE RESPONSE:", response.text[:1000])
-
     response.raise_for_status()
 
     data = response.json().get("data", [])
-
     AVAILABLE_CACHE["data"] = data
     AVAILABLE_CACHE["expires_at"] = now + 3600
 
@@ -122,14 +116,17 @@ def extrair_uf_oab(valor):
     return None
 
 
+def extrair_ano_cnj(cnj):
+    match = re.search(r"\.\d{4}\.", cnj)
+    if not match:
+        return "Sem ano"
+
+    return match.group(0).replace(".", "")
+
+
 def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
     if ctx is None:
-        ctx = {
-            "source": "courts",
-            "platform": None,
-            "search": None,
-            "query": None
-        }
+        ctx = {"source": "courts", "platform": None, "search": None, "query": None}
 
     if saida is None:
         saida = []
@@ -158,12 +155,7 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
             if not isinstance(param, dict):
                 continue
 
-            key = (
-                param.get("tag")
-                or param.get("key")
-                or param.get("name")
-                or param.get("param")
-            )
+            key = param.get("tag") or param.get("key") or param.get("name") or param.get("param")
 
             if key in param_keys:
                 saida.append({
@@ -197,10 +189,8 @@ def ordenar_por_uf(consultas, uf=None):
 
     def score(item):
         search = str(item.get("search", "")).lower()
-
         if search in prioridade:
             return prioridade.index(search)
-
         return 999
 
     if filtradas:
@@ -217,13 +207,7 @@ def find_queries(param_keys, uf=None):
     vistos = set()
 
     for c in consultas:
-        chave = (
-            c["source"],
-            c["platform"],
-            c["search"],
-            c["query"],
-            c["param_key"]
-        )
+        chave = (c["source"], c["platform"], c["search"], c["query"], c["param_key"])
 
         if chave not in vistos:
             vistos.add(chave)
@@ -255,10 +239,6 @@ def create_request(item, value):
         timeout=30
     )
 
-    print("CODILO CREATE PAYLOAD:", payload)
-    print("CODILO CREATE STATUS:", response.status_code)
-    print("CODILO CREATE RESPONSE:", response.text[:1000])
-
     if response.status_code not in [200, 201]:
         raise Exception(f"Create {response.status_code}: {response.text[:500]}")
 
@@ -286,9 +266,6 @@ def get_request_result(request_id):
             timeout=30
         )
 
-        print("CODILO RESULT STATUS:", response.status_code)
-        print("CODILO RESULT RESPONSE:", response.text[:1000])
-
         if response.status_code not in [200, 201]:
             raise Exception(f"Result {response.status_code}: {response.text[:500]}")
 
@@ -314,29 +291,26 @@ def get_request_result(request_id):
     return {"success": False, "status": "timeout", "data": []}
 
 
-def listar_requests(search=None):
-    params = {
-        "page": 1,
-        "limit": 20
-    }
+def achar_cnjs_no_objeto(obj):
+    texto = str(obj)
+    return list(set(re.findall(CNJ_REGEX, texto)))
 
-    if search:
-        params["search"] = search
 
-    response = requests.get(
-        LIST_REQUEST_URL,
-        headers=codilo_headers(),
-        params=params,
-        timeout=30
-    )
+def extrair_lista_processos(resultado):
+    data = resultado.get("data", [])
 
-    print("CODILO LIST STATUS:", response.status_code)
-    print("CODILO LIST RESPONSE:", response.text[:2000])
+    if isinstance(data, list):
+        return data
 
-    if response.status_code not in [200, 201]:
-        raise Exception(f"List {response.status_code}: {response.text[:500]}")
+    if isinstance(data, dict):
+        for chave in ["items", "processes", "processos", "result", "results", "lawsuits", "records"]:
+            if isinstance(data.get(chave), list):
+                return data.get(chave)
 
-    return response.json()
+        if data.get("properties") or data.get("people") or data.get("number"):
+            return [data]
+
+    return []
 
 
 def get_any(obj, keys, default="Não informado"):
@@ -345,7 +319,6 @@ def get_any(obj, keys, default="Não informado"):
 
     for key in keys:
         value = obj.get(key)
-
         if value not in [None, "", [], {}]:
             return value
 
@@ -400,10 +373,8 @@ def extrair_pessoas(processo):
 
         if "adv" in tipo or "lawyer" in tipo:
             advogados.append(nome)
-
         elif "autor" in tipo or "requerente" in tipo or "exequente" in tipo or "active" in tipo:
             autores.append(nome)
-
         elif "réu" in tipo or "reu" in tipo or "requerido" in tipo or "executado" in tipo or "passive" in tipo:
             reus.append(nome)
 
@@ -415,36 +386,6 @@ def extrair_pessoas(processo):
         "reu": reus[0] if reus else "Não informado",
         "advogado": advogados[0] if advogados else "Não informado"
     }
-
-
-def extrair_lista_processos(resultado):
-    data = resultado.get("data", [])
-
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict):
-        for chave in [
-            "items",
-            "processes",
-            "processos",
-            "result",
-            "results",
-            "lawsuits",
-            "records"
-        ]:
-            if isinstance(data.get(chave), list):
-                return data.get(chave)
-
-        if data.get("properties") or data.get("people") or data.get("number"):
-            return [data]
-
-    return []
-
-
-def achar_cnjs_no_objeto(obj):
-    texto = str(obj)
-    return list(set(re.findall(CNJ_REGEX, texto)))
 
 
 def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
@@ -493,31 +434,22 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
     )
 
 
-def executar_busca(valor, tipo):
+def buscar_cnjs(valor, tipo):
     uf = None
 
     if tipo == "nomeadv":
         param_keys = ["nomeadv", "nomeadvogado", "advogado"]
-
     elif tipo == "oab":
         param_keys = ["oab"]
         uf = extrair_uf_oab(valor)
-
     elif tipo == "nomeparte":
         param_keys = ["nomeparte", "nome"]
-
     else:
-        return "❌ Tipo de busca inválido."
+        return {}, uf, []
 
-    try:
-        consultas = find_queries(param_keys, uf=uf)
-    except Exception as e:
-        return f"❌ Erro ao buscar abrangência da Codilo:\n{str(e)}"
+    consultas = find_queries(param_keys, uf=uf)
 
-    if not consultas:
-        return "❌ Nenhuma rota disponível para esse tipo de busca."
-
-    processos_unicos = {}
+    processos_por_ano = {}
     erros = []
 
     for item in consultas:
@@ -525,136 +457,203 @@ def executar_busca(valor, tipo):
             request_id = create_request(item, valor)
             resultado = get_request_result(request_id)
 
-            processos = extrair_lista_processos(resultado)
+            cnjs = achar_cnjs_no_objeto(resultado)
 
-            for processo in processos:
-                if not isinstance(processo, dict):
-                    continue
+            for cnj in cnjs:
+                ano = extrair_ano_cnj(cnj)
 
-                props = processo.get("properties") or processo
-
-                numero = (
-                    props.get("number")
-                    or props.get("cnj")
-                    or props.get("numero")
-                    or props.get("numeroProcesso")
-                    or props.get("processo")
-                    or props.get("processNumber")
-                )
-
-                if not numero:
-                    encontrados = achar_cnjs_no_objeto(processo)
-                    numero = encontrados[0] if encontrados else None
-
-                if numero:
-                    processos_unicos[numero] = {
-                        "processo": processo,
-                        "tribunal": item.get("search", "Não informado")
-                    }
-
-            cnjs_texto = achar_cnjs_no_objeto(resultado)
-
-            for cnj in cnjs_texto:
-                if cnj not in processos_unicos:
-                    processos_unicos[cnj] = {
-                        "processo": {
-                            "properties": {"number": cnj},
-                            "people": []
-                        },
-                        "tribunal": item.get("search", "Não informado")
-                    }
+                processos_por_ano.setdefault(ano, {})
+                processos_por_ano[ano][cnj] = {
+                    "cnj": cnj,
+                    "tribunal": item.get("search", "Não informado")
+                }
 
         except Exception as e:
-            erros.append(
-                f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:180]}"
-            )
+            erros.append(f"{item.get('search')}/{item.get('query')}/{item.get('param_key')}: {str(e)[:160]}")
+
+    return processos_por_ano, uf, erros
+
+
+def buscar_detalhes_por_cnj(cnj, tribunal_preferido=None):
+    consultas = find_queries(["cnj", "numero", "numeroProcesso", "processo"])
+
+    if tribunal_preferido:
+        preferidas = [
+            c for c in consultas
+            if str(c.get("search", "")).lower() == str(tribunal_preferido).lower()
+        ]
+        if preferidas:
+            consultas = preferidas + [c for c in consultas if c not in preferidas]
+
+    for item in consultas[:10]:
+        try:
+            request_id = create_request(item, cnj)
+            resultado = get_request_result(request_id)
+            processos = extrair_lista_processos(resultado)
+
+            if processos:
+                return processos[0], item.get("search", tribunal_preferido or "Não informado")
+
+            cnjs = achar_cnjs_no_objeto(resultado)
+            if cnj in cnjs:
+                return {"properties": {"number": cnj}, "people": []}, item.get("search", tribunal_preferido or "Não informado")
+
+        except Exception:
             continue
 
-    if not processos_unicos:
-        erro_exemplo = "\n".join(erros[:8]) if erros else "Sem erro detalhado."
-
-        return (
-            "❌ Nenhum processo encontrado.\n\n"
-            f"UF detectada: {uf or 'Não detectada'}\n"
-            f"Consultas tentadas: {len(consultas)}\n"
-            f"Falhas/sem retorno: {len(erros)}\n\n"
-            f"Primeiros erros:\n{erro_exemplo}"
-        )
-
-    resposta = (
-        f"🔎 Resultados encontrados: {len(processos_unicos)}\n"
-        f"UF detectada: {uf or 'Não aplicada'}\n"
-        f"Consultas realizadas: {len(consultas)}\n\n"
-    )
-
-    for i, (cnj, item) in enumerate(processos_unicos.items(), start=1):
-        resposta += f"========== {i} ==========\n"
-        resposta += formatar_processo(
-            item["processo"],
-            item["tribunal"],
-            cnj_forcado=cnj
-        )
-        resposta += "\n"
-
-        if len(resposta) > 3800:
-            resposta += "\n⚠️ Resultado cortado pelo limite do Telegram."
-            break
-
-    return resposta[:4000]
+    return {"properties": {"number": cnj}, "people": []}, tribunal_preferido or "Não informado"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🇧🇷 ConsultaBot Codilo Online\n\n"
+        "🇧🇷 ConsultaBot V6 Online\n\n"
         "Comandos:\n"
-        "/nomeadv Nome do Advogado\n"
         "/oab 123636--RS\n"
-        "/nomeparte Nome da Parte\n"
-        "/mapacodilo\n"
-        "/debugcodilo\n"
-        "/listacodilo tjrs"
+        "/nomeadv Nome do Advogado\n"
+        "/nomeparte Nome da Parte\n\n"
+        "Depois da busca, escolha o ano pelos botões."
     )
 
 
-async def mapacodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def executar_busca_com_botoes(update: Update, context: ContextTypes.DEFAULT_TYPE, tipo: str):
+    valor = " ".join(context.args).strip()
+
+    if not valor:
+        await update.message.reply_text("Digite o termo da busca.")
+        return
+
+    msg = await update.message.reply_text("🔎 Buscando processos e separando por ano...")
+
     try:
-        available = get_available()
-
-        tags_alvo = [
-            "oab",
-            "nomeadv",
-            "nomeadvogado",
-            "advogado",
-            "nomeparte",
-            "nome",
-            "doc",
-            "cpf",
-            "cnpj",
-            "cnj",
-            "numero",
-            "numeroProcesso",
-            "processo"
-        ]
-
-        consultas = extrair_queries_disponiveis(available, tags_alvo)
-
-        if not consultas:
-            await update.message.reply_text("❌ Nenhuma combinação encontrada no /available.")
-            return
-
-        linhas = []
-
-        for c in consultas:
-            linhas.append(
-                f"{c['search']}/{c['query']}/{c['param_key']} | platform={c['platform']} | source={c['source']}"
-            )
-
-        texto = "📌 Combinações disponíveis:\n\n" + "\n".join(linhas[:100])
-
-        await update.message.reply_text(texto[:4000])
-
+        processos_por_ano, uf, erros = await asyncio.to_thread(buscar_cnjs, valor, tipo)
     except Exception as e:
-        await update.message.reply_text(f"❌ Erro no mapa Codilo:\n{str(e)}")
+        await msg.edit_text(f"❌ Erro na busca:\n{str(e)}")
+        return
+
+    if not processos_por_ano:
+        erro_exemplo = "\n".join(erros[:6]) if erros else "Sem erro detalhado."
+        await msg.edit_text(
+            "❌ Nenhum processo encontrado.\n\n"
+            f"UF detectada: {uf or 'Não detectada'}\n"
+            f"Falhas/sem retorno: {len(erros)}\n\n"
+            f"Primeiros erros:\n{erro_exemplo}"
+        )
+        return
+
+    user_id = update.effective_user.id
+
+    USER_RESULTS[user_id] = {
+        "valor": valor,
+        "tipo": tipo,
+        "uf": uf,
+        "processos_por_ano": processos_por_ano,
+        "created_at": time.time()
+    }
+
+    anos = sorted(processos_por_ano.keys(), reverse=True)
+
+    keyboard = []
+
+    for ano in anos:
+        qtd = len(processos_por_ano[ano])
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📂 Processos {ano} ({qtd})",
+                callback_data=f"ano:{ano}"
+            )
+        ])
+
+    total = sum(len(v) for v in processos_por_ano.values())
+
+    texto = (
+        f"✅ Busca concluída.\n\n"
+        f"Resultados encontrados: {total}\n"
+        f"UF detectada: {uf or 'Não aplicada'}\n\n"
+        f"Escolha o ano abaixo para ver os processos:"
+    )
+
+    await msg.edit_text(
+        texto,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def oab(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await executar_busca_com_botoes(update, context, "oab")
+
+
+async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await executar_busca_com_botoes(update, context, "nomeadv")
+
+
+async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await executar_busca_com_botoes(update, context, "nomeparte")
+
+
+async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    if not data.startswith("ano:"):
+        return
+
+    ano = data.split(":", 1)[1]
+
+    session = USER_RESULTS.get(user_id)
+
+    if not session:
+        await query.edit_message_text("❌ Busca expirada. Faça uma nova consulta.")
+        return
+
+    processos_ano = session["processos_por_ano"].get(ano, {})
+
+    if not processos_ano:
+        await query.edit_message_text("❌ Nenhum processo encontrado para esse ano.")
+        return
+
+    await query.edit_message_text(
+        f"🔎 Carregando processos de {ano}...\n\n"
+        f"Total encontrado: {len(processos_ano)}\n"
+        f"Vou retornar até {MAX_PROCESSOS_POR_ANO} processos neste clique."
+    )
+
+    itens = list(processos_ano.values())[:MAX_PROCESSOS_POR_ANO]
+
+    resposta = (
+        f"📂 Processos do ano {ano}\n"
+        f"Total encontrado: {len(processos_ano)}\n"
+        f"Exibindo: {len(itens)}\n\n"
+    )
+
+    for i, item in enumerate(itens, start=1):
+        cnj = item["cnj"]
+        tribunal = item.get("tribunal", "Não informado")
+
+        processo, tribunal_final = await asyncio.to_thread(
+            buscar_detalhes_por_cnj,
+            cnj,
+            tribunal
+        )
+
+        resposta += f"========== {i} ==========\n"
+        resposta += formatar_processo(
+            processo,
+            tribunal_final,
+            cnj_forcado=cnj
+        )
+        resposta += "\n"
+
+        if len(resposta) > 3600:
+            resposta += "\n⚠️ Resultado cortado pelo limite do Telegram."
+            break
+
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=resposta[:4000]
+    )
 
 
 async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -662,9 +661,9 @@ async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = get_codilo_token()
         available = get_available()
 
-        nomeadv_q = find_queries(["nomeadv", "nomeadvogado", "advogado"])
-        oab_q = find_queries(["oab"])
         oab_rs_q = find_queries(["oab"], uf="RS")
+        oab_q = find_queries(["oab"])
+        nomeadv_q = find_queries(["nomeadv", "nomeadvogado", "advogado"])
         parte_q = find_queries(["nomeparte", "nome"])
         cnj_q = find_queries(["cnj", "numero", "numeroProcesso", "processo"])
 
@@ -672,9 +671,9 @@ async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Codilo conectada.\n\n"
             f"Token: {'OK' if token else 'Falhou'}\n"
             f"Abrangência recebida: {len(available)} itens\n"
-            f"Rotas nomeadv: {len(nomeadv_q)}\n"
-            f"Rotas OAB geral: {len(oab_q)}\n"
             f"Rotas OAB RS: {len(oab_rs_q)}\n"
+            f"Rotas OAB geral: {len(oab_q)}\n"
+            f"Rotas nomeadv: {len(nomeadv_q)}\n"
             f"Rotas nomeparte: {len(parte_q)}\n"
             f"Rotas CNJ: {len(cnj_q)}"
         )
@@ -683,115 +682,12 @@ async def debugcodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Debug Codilo erro:\n{str(e)}")
 
 
-async def listacodilo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        filtro = None
-
-        if context.args:
-            filtro = context.args[0]
-
-        data = listar_requests(filtro)
-
-        items = (
-            data.get("data")
-            or data.get("items")
-            or data.get("results")
-            or []
-        )
-
-        if isinstance(items, dict):
-            items = (
-                items.get("items")
-                or items.get("results")
-                or items.get("data")
-                or []
-            )
-
-        if not items:
-            await update.message.reply_text("❌ Nenhuma request encontrada.")
-            return
-
-        resposta = "📋 Últimas requests Codilo:\n\n"
-
-        for i, item in enumerate(items[:10], start=1):
-            request_id = item.get("id") or item.get("_id") or "?"
-            search = item.get("search") or "?"
-            query = item.get("query") or "?"
-            status = (
-                item.get("status")
-                or item.get("requested", {}).get("status")
-                or "?"
-            )
-            success = item.get("success")
-            erro = (
-                item.get("error")
-                or item.get("message")
-                or item.get("requested", {}).get("message")
-                or "Sem erro"
-            )
-
-            resposta += (
-                f"========== {i} ==========\n"
-                f"ID: {request_id}\n"
-                f"Search: {search}\n"
-                f"Query: {query}\n"
-                f"Status: {status}\n"
-                f"Success: {success}\n"
-                f"Erro: {str(erro)[:120]}\n\n"
-            )
-
-            if len(resposta) > 3500:
-                break
-
-        await update.message.reply_text(resposta[:4000])
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erro listando requests:\n{str(e)}")
-
-
-async def nomeadv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    valor = " ".join(context.args).strip()
-
-    if not valor:
-        await update.message.reply_text("Use: /nomeadv Nome do Advogado")
-        return
-
-    msg = await update.message.reply_text("🔎 Consultando advogado nas rotas disponíveis...")
-    resultado = await asyncio.to_thread(executar_busca, valor, "nomeadv")
-    await msg.edit_text(resultado)
-
-
-async def oab(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    valor = " ".join(context.args).strip()
-
-    if not valor:
-        await update.message.reply_text("Use: /oab 123636--RS")
-        return
-
-    msg = await update.message.reply_text("🔎 Consultando OAB com filtro de UF...")
-    resultado = await asyncio.to_thread(executar_busca, valor, "oab")
-    await msg.edit_text(resultado)
-
-
-async def nomeparte(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    valor = " ".join(context.args).strip()
-
-    if not valor:
-        await update.message.reply_text("Use: /nomeparte Nome da Parte")
-        return
-
-    msg = await update.message.reply_text("🔎 Consultando parte nas rotas disponíveis...")
-    resultado = await asyncio.to_thread(executar_busca, valor, "nomeparte")
-    await msg.edit_text(resultado)
-
-
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("mapacodilo", mapacodilo))
 telegram_app.add_handler(CommandHandler("debugcodilo", debugcodilo))
-telegram_app.add_handler(CommandHandler("listacodilo", listacodilo))
-telegram_app.add_handler(CommandHandler("nomeadv", nomeadv))
 telegram_app.add_handler(CommandHandler("oab", oab))
+telegram_app.add_handler(CommandHandler("nomeadv", nomeadv))
 telegram_app.add_handler(CommandHandler("nomeparte", nomeparte))
+telegram_app.add_handler(CallbackQueryHandler(callback_ano, pattern=r"^ano:"))
 
 
 @app.post("/webhook")
@@ -804,7 +700,7 @@ async def webhook(req: Request):
 
 @app.get("/")
 def home():
-    return {"status": "ConsultaBot Codilo Online"}
+    return {"status": "ConsultaBot V6 Online"}
 
 
 @app.on_event("startup")
