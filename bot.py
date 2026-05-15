@@ -18,7 +18,7 @@ RENDER_URL = os.getenv("RENDER_URL", "").rstrip("/")
 CODILO_KEY = os.getenv("CODILO_KEY")
 CODILO_SECRET = os.getenv("CODILO_SECRET")
 
-MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "6"))
+MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "100"))
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "8"))
 
 AUTH_URL = "https://auth.codilo.com.br/oauth/token"
@@ -284,24 +284,24 @@ def ordenar_por_uf(consultas, uf=None):
         return consultas
 
     prioridade = UF_TRIBUNAIS.get(uf.upper(), [])
+
     if not prioridade:
         return consultas
 
-    filtradas = [
-        c for c in consultas
-        if str(c.get("search", "")).lower() in prioridade
-    ]
+    # PRIORIDADE PRIMEIRO
+    prioritarios = []
+    restantes = []
 
-    if not filtradas:
-        return consultas
+    for c in consultas:
+        search = str(c.get("search", "")).lower()
 
-    return sorted(
-        filtradas,
-        key=lambda item: prioridade.index(str(item.get("search", "")).lower())
-        if str(item.get("search", "")).lower() in prioridade
-        else 999,
-    )
+        if search in prioridade:
+            prioritarios.append(c)
+        else:
+            restantes.append(c)
 
+    # NÃO REMOVE os outros tribunais
+    return prioritarios + restantes
 
 def find_queries(param_keys, uf=None):
     available = get_available()
