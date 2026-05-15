@@ -252,8 +252,6 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
         or "Não informado"
     )
 
-    tribunal = fallback_tribunal
-
     origem = (
         props.get("origin")
         or props.get("origem")
@@ -305,7 +303,7 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
         f"Réu: {pessoas['reu']}\n\n"
         f"Classe: {classe}\n\n"
         f"Assunto: {assunto}\n\n"
-        f"Tribunal: {tribunal} - {origem}\n\n"
+        f"Tribunal: {fallback_tribunal} - {origem}\n\n"
         f"Nº do processo: {numero}\n\n"
         f"Data de autuação: {data_autuacao}\n\n"
         f"Situação: {status}\n\n"
@@ -443,6 +441,36 @@ def find_queries(param_keys, uf=None):
     return unicas[:MAX_CODILO_REQUESTS]
 
 
+def find_queries_por_tribunal(param_keys, tribunal):
+    available = get_available()
+    consultas = extrair_queries_disponiveis(available, param_keys)
+
+    tribunal = str(tribunal or "").lower()
+
+    filtradas = [
+        c for c in consultas
+        if str(c.get("search", "")).lower() == tribunal
+    ]
+
+    unicas = []
+    vistos = set()
+
+    for c in filtradas:
+        chave = (
+            c["source"],
+            c["platform"],
+            c["search"],
+            c["query"],
+            c["param_key"]
+        )
+
+        if chave not in vistos:
+            vistos.add(chave)
+            unicas.append(c)
+
+    return unicas[:3]
+
+
 def create_request(item, value):
     payload = {
         "source": item["source"],
@@ -528,16 +556,15 @@ def get_request_result(request_id):
             print(json.dumps(resultado, indent=2, ensure_ascii=False)[:50000])
             print("==============================\n")
 
+            status = get_status_request(resultado)
             cnjs = achar_cnjs_no_objeto(resultado)
 
-            if cnjs and get_status_request(resultado) != "pending":
+            if cnjs and status != "pending":
                 return {
                     "success": True,
                     "fallback_cnjs": cnjs,
                     "raw": resultado
                 }
-
-            status = get_status_request(resultado)
 
             if status in ["pending", "processing", "running", "waiting", "created"]:
                 time.sleep(15)
@@ -657,6 +684,41 @@ def buscar_cnjs(valor, tipo):
     return processos_por_ano, uf, erros
 
 
+def buscar_detalhe_direto_por_tribunal(cnj, tribunal):
+    if not tribunal or tribunal == "Não informado":
+        return None
+
+    consultas = find_queries_por_tribunal(["cnj"], tribunal)
+
+    for item in consultas:
+        try:
+            request_id = create_request(item, cnj)
+            resultado = get_request_result(request_id)
+            processos = extrair_lista_processos(resultado)
+
+            for processo in processos:
+                if not isinstance(processo, dict):
+                    continue
+
+                cover = processo.get("cover", [])
+                props = processo.get("properties", {})
+                people = processo.get("people", [])
+                steps = processo.get("steps", [])
+
+                if cover or props or people or steps:
+                    return formatar_processo(
+                        processo,
+                        fallback_tribunal=tribunal,
+                        cnj_forcado=cnj
+                    )
+
+        except Exception as e:
+            print("ERRO detalhe direto:", str(e))
+            continue
+
+    return None
+
+
 def criar_autorequest(cnj):
     payload = {
         "key": "cnj",
@@ -718,9 +780,17 @@ def consultar_autorequest(auto_id):
     return [], requests_list
 
 
-def buscar_detalhes_autorequest(cnj):
-    if cnj in DETAIL_CACHE:
-        return DETAIL_CACHE[cnj]
+def buscar_detalhes_autorequest(cnj, tribunal=None):
+    cache_key = f"{cnj}:{tribunal or ''}"
+
+    if cache_key in DETAIL_CACHE:
+        return DETAIL_CACHE[cache_key]
+
+    direto = buscar_detalhe_direto_por_tribunal(cnj, tribunal)
+
+    if direto:
+        DETAIL_CACHE[cache_key] = direto
+        return direto
 
     if cnj in AUTO_CACHE:
         auto_id = AUTO_CACHE[cnj]["auto_id"]
@@ -737,7 +807,7 @@ def buscar_detalhes_autorequest(cnj):
 
     for req in success_requests:
         request_id = req.get("id")
-        tribunal = req.get("court") or req.get("search") or "Não informado"
+        tribunal_req = req.get("court") or req.get("search") or tribunal or "Não informado"
 
         if not request_id:
             continue
@@ -755,16 +825,14 @@ def buscar_detalhes_autorequest(cnj):
                 people = processo.get("people", [])
                 steps = processo.get("steps", [])
 
-                tem_dados = bool(cover) or bool(props) or bool(people) or bool(steps)
-
-                if tem_dados:
+                if cover or props or people or steps:
                     resposta = formatar_processo(
                         processo,
-                        fallback_tribunal=tribunal,
+                        fallback_tribunal=tribunal_req,
                         cnj_forcado=cnj
                     )
 
-                    DETAIL_CACHE[cnj] = resposta
+                    DETAIL_CACHE[cache_key] = resposta
                     return resposta
 
             ultimo_erro = "Requisição success, mas veio sem properties, people, cover e steps."
@@ -780,13 +848,17 @@ def buscar_detalhes_autorequest(cnj):
                 f"{r.get('court') or r.get('search') or '?'}: {r.get('status') or '?'}"
             )
 
-        return (
-            f"⏳ Ainda não consegui montar a capa completa.\n\n"
-            f"Nº do processo: {cnj}\n"
-            f"AutoRequest ID: {auto_id}\n\n"
-            f"Status interno:\n" + "\n".join(resumo) + "\n\n"
-            f"Tente clicar em 🔎 Ver detalhes novamente em alguns minutos."
-        )
+        return {
+            "pending": True,
+            "cnj": cnj,
+            "tribunal": tribunal or "",
+            "texto": (
+                f"⏳ Ainda não consegui montar a capa completa.\n\n"
+                f"Nº do processo:\n{cnj}\n\n"
+                f"AutoRequest ID:\n{auto_id}\n\n"
+                f"Status interno:\n" + "\n".join(resumo)
+            )
+        }
 
     return (
         f"❌ Consulta finalizada, mas não retornou dados úteis.\n\n"
@@ -803,7 +875,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/oab 123636--RS\n"
         "/nomeadv Nome do Advogado\n"
         "/nomeparte Nome da Parte\n\n"
-        "Depois escolha o ano e clique em 🔎 Ver detalhes."
+        "Depois escolha o ano e clique no processo para ver detalhes."
     )
 
 
@@ -926,17 +998,19 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📂 Processos do ano {ano}\n"
         f"Total encontrado: {len(processos_ano)}\n"
         f"Exibindo: {len(itens)}\n\n"
-        "Clique em apenas um processo para ver detalhes:"
+        "Clique em um processo para ver detalhes:"
     )
 
     keyboard = []
 
     for i, item in enumerate(itens, start=1):
         cnj = item["cnj"]
+        tribunal = item.get("tribunal", "")
+
         keyboard.append([
             InlineKeyboardButton(
                 f"🔎 {i}. {cnj}",
-                callback_data=f"detalhe:{cnj}"
+                callback_data=f"detalhe:{cnj}:{tribunal}"
             )
         ])
 
@@ -950,25 +1024,48 @@ async def callback_detalhe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Consultando detalhes...")
 
-    cnj = query.data.split(":", 1)[1]
+    partes = query.data.split(":")
+    cnj = partes[1] if len(partes) > 1 else ""
+    tribunal = partes[2] if len(partes) > 2 else ""
 
     await query.edit_message_text(
         f"🔎 Consultando detalhes do processo:\n{cnj}\n\nAguarde..."
     )
 
     try:
-        resposta = await asyncio.to_thread(buscar_detalhes_autorequest, cnj)
-    except Exception as e:
-        resposta = (
-            f"❌ Erro ao buscar detalhes.\n\n"
-            f"Nº do processo: {cnj}\n"
-            f"Erro: {str(e)[:500]}"
+        resposta = await asyncio.to_thread(buscar_detalhes_autorequest, cnj, tribunal)
+
+        if isinstance(resposta, dict) and resposta.get("pending"):
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🔄 Tentar novamente",
+                        callback_data=f"detalhe:{cnj}:{tribunal}"
+                    )
+                ]
+            ]
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=resposta["texto"][:4000],
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=str(resposta)[:4000]
         )
 
-    await context.bot.send_message(
-        chat_id=query.message.chat_id,
-        text=resposta[:4000]
-    )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                f"❌ Erro ao buscar detalhes.\n\n"
+                f"Nº do processo: {cnj}\n"
+                f"Erro: {str(e)[:500]}"
+            )
+        )
 
 
 telegram_app.add_handler(CommandHandler("start", start))
