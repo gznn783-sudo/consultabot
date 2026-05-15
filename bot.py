@@ -154,6 +154,192 @@ def buscar_recursivo(obj, chaves):
     return None
 
 
+def get_cover_value(processo, nome):
+    cover = processo.get("cover", [])
+
+    if not isinstance(cover, list):
+        return None
+
+    for item in cover:
+        if not isinstance(item, dict):
+            continue
+
+        desc = str(item.get("description", "")).lower()
+        valor = item.get("value")
+
+        if nome.lower() in desc and valor not in [None, "", [], {}]:
+            return valor
+
+    return None
+
+
+def normalizar_nome(pessoa):
+    if isinstance(pessoa, str):
+        return pessoa
+
+    if not isinstance(pessoa, dict):
+        return "Não informado"
+
+    return (
+        pessoa.get("name")
+        or pessoa.get("nome")
+        or pessoa.get("value")
+        or pessoa.get("description")
+        or pessoa.get("label")
+        or pessoa.get("document")
+        or "Não informado"
+    )
+
+
+def extrair_pessoas(processo):
+    pessoas = (
+        processo.get("people")
+        or processo.get("partes")
+        or processo.get("persons")
+        or processo.get("parties")
+        or processo.get("envolvidos")
+        or []
+    )
+
+    autores = []
+    reus = []
+    advogados = []
+
+    for pessoa in pessoas:
+        if not isinstance(pessoa, dict):
+            continue
+
+        nome = normalizar_nome(pessoa)
+
+        tipo = " ".join([
+            str(pessoa.get("type", "")),
+            str(pessoa.get("role", "")),
+            str(pessoa.get("side", "")),
+            str(pessoa.get("qualifier", "")),
+            str(pessoa.get("description", "")),
+            str(pessoa.get("kind", "")),
+            str(pessoa.get("pole", "")),
+        ]).lower()
+
+        if "adv" in tipo or "lawyer" in tipo:
+            advogados.append(nome)
+        elif "autor" in tipo or "requerente" in tipo or "exequente" in tipo or "active" in tipo or "agravante" in tipo:
+            autores.append(nome)
+        elif "réu" in tipo or "reu" in tipo or "requerido" in tipo or "executado" in tipo or "passive" in tipo or "agravado" in tipo:
+            reus.append(nome)
+
+        for adv in pessoa.get("lawyers", []) or pessoa.get("advogados", []):
+            advogados.append(normalizar_nome(adv))
+
+    return {
+        "autor": autores[0] if autores else "Não informado",
+        "reu": reus[0] if reus else "Não informado",
+        "advogado": ", ".join(list(dict.fromkeys(advogados))) if advogados else "Não informado"
+    }
+
+
+def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
+    props = processo.get("properties") or {}
+
+    pessoas = extrair_pessoas(processo)
+
+    numero = (
+        cnj_forcado
+        or props.get("cnj")
+        or props.get("number")
+        or props.get("numero")
+        or props.get("numeroProcesso")
+        or "Não informado"
+    )
+
+    tribunal = fallback_tribunal
+
+    origem = (
+        props.get("origin")
+        or props.get("origem")
+        or get_cover_value(processo, "Órgão Julgador")
+        or get_cover_value(processo, "Competência")
+        or "Não informado"
+    )
+
+    assunto = (
+        props.get("subjects")
+        or props.get("subject")
+        or props.get("assunto")
+        or get_cover_value(processo, "Assuntos")
+        or props.get("class")
+        or "Não informado"
+    )
+
+    valor = (
+        props.get("value")
+        or props.get("valor")
+        or props.get("valorCausa")
+        or get_cover_value(processo, "Valor da causa")
+        or "Não informado"
+    )
+
+    classe = (
+        props.get("class")
+        or props.get("classe")
+        or get_cover_value(processo, "Classe")
+        or "Não informado"
+    )
+
+    status = (
+        props.get("status")
+        or get_cover_value(processo, "Situação")
+        or "Não informado"
+    )
+
+    data_autuacao = (
+        props.get("startAt")
+        or get_cover_value(processo, "Data de autuação")
+        or "Não informado"
+    )
+
+    return (
+        f"Prezado Cliente!\n\n"
+        f"Autor: {pessoas['autor']}\n\n"
+        f"CPF: Não informado\n\n"
+        f"Réu: {pessoas['reu']}\n\n"
+        f"Classe: {classe}\n\n"
+        f"Assunto: {assunto}\n\n"
+        f"Tribunal: {tribunal} - {origem}\n\n"
+        f"Nº do processo: {numero}\n\n"
+        f"Data de autuação: {data_autuacao}\n\n"
+        f"Situação: {status}\n\n"
+        f"Valor da causa: {valor}\n\n"
+        f"Advogado: {pessoas['advogado']}"
+    )
+
+
+def extrair_lista_processos(resultado):
+    data = resultado.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for chave in [
+            "items",
+            "processes",
+            "processos",
+            "result",
+            "results",
+            "lawsuits",
+            "records",
+            "lawsuit",
+            "process"
+        ]:
+            if isinstance(data.get(chave), list):
+                return data.get(chave)
+
+        return [data]
+
+    return []
+
+
 def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
     if ctx is None:
         ctx = {"source": "courts", "platform": None, "search": None, "query": None}
@@ -344,7 +530,7 @@ def get_request_result(request_id):
 
             cnjs = achar_cnjs_no_objeto(resultado)
 
-            if cnjs:
+            if cnjs and get_status_request(resultado) != "pending":
                 return {
                     "success": True,
                     "fallback_cnjs": cnjs,
@@ -354,7 +540,6 @@ def get_request_result(request_id):
             status = get_status_request(resultado)
 
             if status in ["pending", "processing", "running", "waiting", "created"]:
-                print(f"⏳ Aguardando request {request_id} tentativa {tentativa + 1}/20")
                 time.sleep(15)
                 continue
 
@@ -533,188 +718,6 @@ def consultar_autorequest(auto_id):
     return [], requests_list
 
 
-def get_any(obj, keys, default="Não informado"):
-    if not isinstance(obj, dict):
-        return default
-
-    for key in keys:
-        value = obj.get(key)
-
-        if value not in [None, "", [], {}]:
-            return value
-
-    recursive = buscar_recursivo(obj, keys)
-
-    if recursive not in [None, "", [], {}]:
-        return recursive
-
-    return default
-
-
-def normalizar_nome(pessoa):
-    if isinstance(pessoa, str):
-        return pessoa
-
-    if not isinstance(pessoa, dict):
-        return "Não informado"
-
-    return (
-        pessoa.get("name")
-        or pessoa.get("nome")
-        or pessoa.get("value")
-        or pessoa.get("description")
-        or pessoa.get("label")
-        or pessoa.get("document")
-        or "Não informado"
-    )
-
-
-def extrair_pessoas(processo):
-    pessoas = (
-        processo.get("people")
-        or processo.get("partes")
-        or processo.get("persons")
-        or processo.get("parties")
-        or processo.get("envolvidos")
-        or []
-    )
-
-    autores = []
-    reus = []
-    advogados = []
-
-    for pessoa in pessoas:
-        if not isinstance(pessoa, dict):
-            continue
-
-        nome = normalizar_nome(pessoa)
-
-        tipo = " ".join([
-            str(pessoa.get("type", "")),
-            str(pessoa.get("role", "")),
-            str(pessoa.get("side", "")),
-            str(pessoa.get("qualifier", "")),
-            str(pessoa.get("description", "")),
-            str(pessoa.get("kind", "")),
-            str(pessoa.get("pole", "")),
-        ]).lower()
-
-        if "adv" in tipo or "lawyer" in tipo:
-            advogados.append(nome)
-        elif "autor" in tipo or "requerente" in tipo or "exequente" in tipo or "active" in tipo:
-            autores.append(nome)
-        elif "réu" in tipo or "reu" in tipo or "requerido" in tipo or "executado" in tipo or "passive" in tipo:
-            reus.append(nome)
-
-        for adv in pessoa.get("lawyers", []) or pessoa.get("advogados", []):
-            advogados.append(normalizar_nome(adv))
-
-    if not autores:
-        autor_rec = buscar_recursivo(processo, ["autor", "author", "plaintiff", "claimant"])
-        if autor_rec:
-            autores.append(normalizar_nome(autor_rec) if isinstance(autor_rec, dict) else str(autor_rec))
-
-    if not reus:
-        reu_rec = buscar_recursivo(processo, ["reu", "réu", "requerido", "defendant"])
-        if reu_rec:
-            reus.append(normalizar_nome(reu_rec) if isinstance(reu_rec, dict) else str(reu_rec))
-
-    if not advogados:
-        adv_rec = buscar_recursivo(processo, ["advogado", "advogados", "lawyer", "lawyers"])
-        if adv_rec:
-            if isinstance(adv_rec, list) and adv_rec:
-                advogados.append(normalizar_nome(adv_rec[0]))
-            else:
-                advogados.append(normalizar_nome(adv_rec) if isinstance(adv_rec, dict) else str(adv_rec))
-
-    return {
-        "autor": autores[0] if autores else "Não informado",
-        "reu": reus[0] if reus else "Não informado",
-        "advogado": advogados[0] if advogados else "Não informado"
-    }
-
-
-def extrair_lista_processos(resultado):
-    data = resultado.get("data", [])
-
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict):
-        for chave in [
-            "items",
-            "processes",
-            "processos",
-            "result",
-            "results",
-            "lawsuits",
-            "records",
-            "lawsuit",
-            "process"
-        ]:
-            if isinstance(data.get(chave), list):
-                return data.get(chave)
-
-        if data.get("properties") or data.get("people") or data.get("number"):
-            return [data]
-
-        return [data]
-
-    return []
-
-
-def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
-    props = (
-        processo.get("properties")
-        or processo.get("capa")
-        or processo.get("cover")
-        or processo
-    )
-
-    pessoas = extrair_pessoas(processo)
-
-    numero = cnj_forcado or get_any(
-        props,
-        ["number", "cnj", "numero", "numeroProcesso", "processo", "processNumber"]
-    )
-
-    tribunal = get_any(
-        props,
-        ["court", "tribunal", "search", "tribunalNome", "forum"],
-        fallback_tribunal
-    )
-
-    origem = get_any(
-        props,
-        ["origin", "origem", "foro", "comarca", "vara", "courtSection", "judgingBody"],
-        "Não informado"
-    )
-
-    assunto = get_any(
-        props,
-        ["subject", "assunto", "subjects", "area", "classe", "class", "nature", "matter"],
-        "Não informado"
-    )
-
-    valor = get_any(
-        props,
-        ["value", "valor", "valorCausa", "valor_da_causa", "claimValue", "amount"],
-        "Não informado"
-    )
-
-    return (
-        f"Prezado Cliente!\n\n"
-        f"Autor: {pessoas['autor']}\n\n"
-        f"CPF: Não informado\n\n"
-        f"Réu: {pessoas['reu']}\n\n"
-        f"Assunto: {assunto}\n\n"
-        f"Tribunal: {tribunal} - {origem}\n\n"
-        f"Nº do processo: {numero}\n\n"
-        f"Valor da causa: {valor}\n\n"
-        f"Advogado: {pessoas['advogado']}"
-    )
-
-
 def buscar_detalhes_autorequest(cnj):
     if cnj in DETAIL_CACHE:
         return DETAIL_CACHE[cnj]
@@ -730,25 +733,6 @@ def buscar_detalhes_autorequest(cnj):
 
     success_requests, all_requests = consultar_autorequest(auto_id)
 
-    if not success_requests:
-        status_resumo = []
-
-        for r in all_requests[:5]:
-            status_resumo.append(
-                f"{r.get('court') or r.get('search') or '?'}: {r.get('status') or '?'}"
-            )
-
-        resumo = "\n".join(status_resumo) if status_resumo else "Sem status interno retornado."
-
-        return (
-            f"⏳ A Codilo ainda não finalizou os dados completos.\n\n"
-            f"Nº do processo: {cnj}\n"
-            f"AutoRequest ID: {auto_id}\n\n"
-            f"Status interno:\n{resumo}\n\n"
-            f"Clique em 🔎 Ver detalhes novamente em alguns minutos.\n"
-            f"Não criei nova consulta para esse CNJ."
-        )
-
     ultimo_erro = None
 
     for req in success_requests:
@@ -762,24 +746,50 @@ def buscar_detalhes_autorequest(cnj):
             resultado = get_request_result(request_id)
             processos = extrair_lista_processos(resultado)
 
-            if processos:
-                resposta = formatar_processo(
-                    processos[0],
-                    fallback_tribunal=tribunal,
-                    cnj_forcado=cnj
-                )
+            for processo in processos:
+                if not isinstance(processo, dict):
+                    continue
 
-                DETAIL_CACHE[cnj] = resposta
-                return resposta
+                cover = processo.get("cover", [])
+                props = processo.get("properties", {})
+                people = processo.get("people", [])
+                steps = processo.get("steps", [])
 
-            ultimo_erro = "Requisição success, mas sem dados de capa."
+                tem_dados = bool(cover) or bool(props) or bool(people) or bool(steps)
+
+                if tem_dados:
+                    resposta = formatar_processo(
+                        processo,
+                        fallback_tribunal=tribunal,
+                        cnj_forcado=cnj
+                    )
+
+                    DETAIL_CACHE[cnj] = resposta
+                    return resposta
+
+            ultimo_erro = "Requisição success, mas veio sem properties, people, cover e steps."
 
         except Exception as e:
             ultimo_erro = str(e)
             continue
 
+    if all_requests:
+        resumo = []
+        for r in all_requests[:8]:
+            resumo.append(
+                f"{r.get('court') or r.get('search') or '?'}: {r.get('status') or '?'}"
+            )
+
+        return (
+            f"⏳ Ainda não consegui montar a capa completa.\n\n"
+            f"Nº do processo: {cnj}\n"
+            f"AutoRequest ID: {auto_id}\n\n"
+            f"Status interno:\n" + "\n".join(resumo) + "\n\n"
+            f"Tente clicar em 🔎 Ver detalhes novamente em alguns minutos."
+        )
+
     return (
-        f"❌ Consulta finalizada, mas não retornou capa completa.\n\n"
+        f"❌ Consulta finalizada, mas não retornou dados úteis.\n\n"
         f"Nº do processo: {cnj}\n"
         f"AutoRequest ID: {auto_id}\n"
         f"Erro: {ultimo_erro or 'Não informado'}"
@@ -892,12 +902,11 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Abrindo pasta...")
 
     user_id = query.from_user.id
-    data = query.data
 
-    if not data.startswith("abrir_ano:"):
+    if not query.data.startswith("abrir_ano:"):
         return
 
-    ano = data.split(":", 1)[1]
+    ano = query.data.split(":", 1)[1]
 
     session = USER_RESULTS.get(user_id)
 
@@ -910,10 +919,6 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key=lambda x: x["cnj"],
         reverse=True
     )
-
-    if not processos_ano:
-        await query.edit_message_text("❌ Nenhum processo encontrado para esse ano.")
-        return
 
     itens = processos_ano[:PAGE_SIZE]
 
@@ -928,7 +933,6 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for i, item in enumerate(itens, start=1):
         cnj = item["cnj"]
-
         keyboard.append([
             InlineKeyboardButton(
                 f"🔎 {i}. {cnj}",
