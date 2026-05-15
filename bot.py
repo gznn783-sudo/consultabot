@@ -30,6 +30,8 @@ AVAILABLE_CACHE = {"data": None, "expires_at": 0}
 USER_RESULTS = {}
 AUTO_CACHE = {}
 DETAIL_CACHE = {}
+BUSCAS_ATIVAS = set()
+UPDATES_PROCESSADOS = set()
 
 PAGE_SIZE = 8
 
@@ -287,17 +289,12 @@ def get_request_result(request_id):
     ultimo_json = {}
 
     for tentativa in range(40):
-
         try:
             response = requests.get(
                 url,
                 headers=codilo_headers(),
                 timeout=60
             )
-
-            print("\n==============================")
-            print("STATUS CODE:", response.status_code)
-            print("==============================")
 
             try:
                 resultado = response.json()
@@ -306,14 +303,11 @@ def get_request_result(request_id):
 
             ultimo_json = resultado
 
+            print("\n==============================")
+            print("STATUS CODE:", response.status_code)
+            print("==============================")
             print("\n=========== JSON BRUTO ===========")
-            print(
-                json.dumps(
-                    resultado,
-                    indent=2,
-                    ensure_ascii=False
-                )[:50000]
-            )
+            print(json.dumps(resultado, indent=2, ensure_ascii=False)[:50000])
             print("\n=========== FIM JSON ===========\n")
 
             cnjs = achar_cnjs_no_objeto(resultado)
@@ -325,54 +319,39 @@ def get_request_result(request_id):
                     "raw": resultado
                 }
 
-            requested = resultado.get("requested", {})
+            requested = resultado.get("requested", {}) if isinstance(resultado, dict) else {}
 
             status = (
                 requested.get("status")
-                or resultado.get("status")
-                or ""
+                or resultado.get("status", "")
+                if isinstance(resultado, dict)
+                else ""
             )
 
             status = str(status).lower()
 
             print(f"STATUS ATUAL: {status}")
 
-            if status in [
-                "pending",
-                "processing",
-                "running",
-                "waiting",
-                "created"
-            ]:
+            if status in ["pending", "processing", "running", "waiting", "created"]:
                 print(f"⏳ Aguardando processamento... tentativa {tentativa + 1}")
                 time.sleep(5)
                 continue
 
-            if status in [
-                "success",
-                "completed",
-                "finished",
-                "done"
-            ]:
+            if status in ["success", "completed", "finished", "done", "warning"]:
                 cnjs = achar_cnjs_no_objeto(resultado)
-
                 return {
                     "success": True,
                     "fallback_cnjs": cnjs,
                     "raw": resultado
                 }
 
-            if status in [
-                "error",
-                "failed",
-                "failure"
-            ]:
+            if status in ["error", "failed", "failure"]:
                 return resultado
 
             time.sleep(5)
 
         except Exception as e:
-            print("ERRO:", str(e))
+            print("ERRO get_request_result:", str(e))
             time.sleep(5)
 
     cnjs = achar_cnjs_no_objeto(ultimo_json)
@@ -765,66 +744,80 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def executar_busca_com_botoes(update: Update, context: ContextTypes.DEFAULT_TYPE, tipo: str):
     valor = " ".join(context.args).strip()
+    user_id = update.effective_user.id
 
     if not valor:
         await update.message.reply_text("Digite o termo da busca.")
         return
 
+    if user_id in BUSCAS_ATIVAS:
+        await update.message.reply_text(
+            "⏳ Já existe uma consulta em andamento.\n\nAguarde finalizar."
+        )
+        return
+
+    BUSCAS_ATIVAS.add(user_id)
+
     msg = await update.message.reply_text("🔎 Buscando processos e separando por ano...")
 
     try:
         processos_por_ano, uf, erros = await asyncio.to_thread(buscar_cnjs, valor, tipo)
-    except Exception as e:
-        await msg.edit_text(f"❌ Erro na busca:\n{str(e)}")
-        return
 
-    if not processos_por_ano:
-        erro_exemplo = "\n".join(erros[:6]) if erros else "Sem erro detalhado."
+        if not processos_por_ano:
+            erro_exemplo = "\n".join(erros[:6]) if erros else "Sem erro detalhado."
+
+            await msg.edit_text(
+                "❌ Nenhum processo encontrado.\n\n"
+                f"UF detectada: {uf or 'Não detectada'}\n"
+                f"Falhas/sem retorno: {len(erros)}\n\n"
+                f"Primeiros erros:\n{erro_exemplo}"
+            )
+            return
+
+        USER_RESULTS[user_id] = {
+            "valor": valor,
+            "tipo": tipo,
+            "uf": uf,
+            "processos_por_ano": processos_por_ano,
+            "created_at": time.time()
+        }
+
+        anos = sorted(
+            processos_por_ano.keys(),
+            key=lambda x: int(x) if str(x).isdigit() else 0,
+            reverse=True
+        )
+
+        keyboard = []
+
+        for ano in anos:
+            qtd = len(processos_por_ano[ano])
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📂 Processos {ano} ({qtd})",
+                    callback_data=f"abrir_ano:{ano}"
+                )
+            ])
+
+        total = sum(len(v) for v in processos_por_ano.values())
+
+        texto = (
+            f"✅ Busca concluída.\n\n"
+            f"Resultados encontrados: {total}\n"
+            f"UF detectada: {uf or 'Não aplicada'}\n\n"
+            f"Escolha o ano abaixo para ver os processos:"
+        )
 
         await msg.edit_text(
-            "❌ Nenhum processo encontrado.\n\n"
-            f"UF detectada: {uf or 'Não detectada'}\n"
-            f"Falhas/sem retorno: {len(erros)}\n\n"
-            f"Primeiros erros:\n{erro_exemplo}"
+            texto,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return
 
-    user_id = update.effective_user.id
+    except Exception as e:
+        await msg.edit_text(f"❌ Erro na busca:\n{str(e)}")
 
-    USER_RESULTS[user_id] = {
-        "valor": valor,
-        "tipo": tipo,
-        "uf": uf,
-        "processos_por_ano": processos_por_ano,
-        "created_at": time.time()
-    }
-
-    anos = sorted(processos_por_ano.keys(), reverse=True)
-
-    keyboard = []
-
-    for ano in anos:
-        qtd = len(processos_por_ano[ano])
-        keyboard.append([
-            InlineKeyboardButton(
-                f"📂 Processos {ano} ({qtd})",
-                callback_data=f"abrir_ano:{ano}"
-            )
-        ])
-
-    total = sum(len(v) for v in processos_por_ano.values())
-
-    texto = (
-        f"✅ Busca concluída.\n\n"
-        f"Resultados encontrados: {total}\n"
-        f"UF detectada: {uf or 'Não aplicada'}\n\n"
-        f"Escolha o ano abaixo para ver os processos:"
-    )
-
-    await msg.edit_text(
-        texto,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    finally:
+        BUSCAS_ATIVAS.discard(user_id)
 
 
 async def oab(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -857,7 +850,11 @@ async def callback_ano(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Busca expirada. Faça uma nova consulta.")
         return
 
-    processos_ano = list(session["processos_por_ano"].get(ano, {}).values())
+    processos_ano = sorted(
+        list(session["processos_por_ano"].get(ano, {}).values()),
+        key=lambda x: x["cnj"],
+        reverse=True
+    )
 
     if not processos_ano:
         await query.edit_message_text("❌ Nenhum processo encontrado para esse ano.")
@@ -926,8 +923,21 @@ telegram_app.add_handler(CallbackQueryHandler(callback_detalhe, pattern=r"^detal
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
+
+    update_id = data.get("update_id")
+
+    if update_id in UPDATES_PROCESSADOS:
+        return {"ok": True, "duplicado": True}
+
+    UPDATES_PROCESSADOS.add(update_id)
+
+    if len(UPDATES_PROCESSADOS) > 500:
+        UPDATES_PROCESSADOS.clear()
+
     update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
+
+    asyncio.create_task(telegram_app.process_update(update))
+
     return {"ok": True}
 
 
