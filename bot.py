@@ -3,6 +3,7 @@ import re
 import time
 import asyncio
 import requests
+import json
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -282,58 +283,97 @@ def create_request(item, value):
 
 def get_request_result(request_id):
     url = f"{REQUEST_URL}/{request_id}"
-    ultimo_texto = ""
 
-    for _ in range(12):
+    for tentativa in range(15):
+        ultimo_texto = ""
+
         try:
             response = requests.get(
                 url,
                 headers=codilo_headers(),
-                timeout=30
+                timeout=60
             )
 
             ultimo_texto = response.text
 
-            if response.status_code in [200, 201]:
-                try:
-                    data = response.json()
-                except Exception:
-                    data = {"raw_text": response.text}
+            print("\n==============================")
+            print("STATUS CODE:", response.status_code)
+            print("==============================")
 
-                status = (
-                    data.get("requested", {}).get("status")
-                    or data.get("data", {}).get("status")
-                    or data.get("status")
-                    or ""
-                )
+            try:
+                resultado = response.json()
+            except Exception:
+                print(response.text)
+                resultado = {}
 
-                status = str(status).lower()
+            print("\n=========== JSON BRUTO ===========")
+            print(
+                json.dumps(
+                    resultado,
+                    indent=2,
+                    ensure_ascii=False
+                )[:50000]
+            )
+            print("\n=========== FIM JSON ===========\n")
 
-                if status in ["success", "warning", "done", "finished", "completed"]:
-                    return data
+            if not resultado:
+                time.sleep(2)
+                continue
 
-                cnjs = achar_cnjs_no_objeto(data)
-                if cnjs:
-                    return {"success": True, "fallback_cnjs": cnjs, "raw": data}
+            success = resultado.get("success")
 
-            else:
-                cnjs = achar_cnjs_no_objeto(response.text)
-                if cnjs:
-                    return {"success": True, "fallback_cnjs": cnjs, "raw_text": response.text}
+            if success is True:
+                return resultado
 
-        except Exception:
-            cnjs = achar_cnjs_no_objeto(ultimo_texto)
+            data = resultado.get("data", {})
+
+            status = (
+                data.get("status")
+                or resultado.get("status")
+                or ""
+            )
+
+            status = str(status).lower()
+
+            if status in [
+                "pending",
+                "processing",
+                "running",
+                "waiting"
+            ]:
+                print(f"⏳ Ainda processando... tentativa {tentativa + 1}")
+                time.sleep(2)
+                continue
+
+            cnjs = achar_cnjs_no_objeto(resultado)
+
             if cnjs:
-                return {"success": True, "fallback_cnjs": cnjs, "raw_text": ultimo_texto}
+                return {
+                    "success": True,
+                    "fallback_cnjs": cnjs,
+                    "raw": resultado
+                }
 
-        time.sleep(4)
+            time.sleep(2)
 
-    cnjs = achar_cnjs_no_objeto(ultimo_texto)
+        except Exception as e:
+            print("ERRO get_request_result:", str(e))
 
-    if cnjs:
-        return {"success": True, "fallback_cnjs": cnjs, "raw_text": ultimo_texto}
+            cnjs = achar_cnjs_no_objeto(ultimo_texto)
 
-    return {"success": False, "data": []}
+            if cnjs:
+                return {
+                    "success": True,
+                    "fallback_cnjs": cnjs,
+                    "raw_text": ultimo_texto
+                }
+
+            time.sleep(2)
+
+    return {
+        "success": False,
+        "data": []
+    }
 
 
 def buscar_cnjs(valor, tipo):
