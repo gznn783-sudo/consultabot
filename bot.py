@@ -28,13 +28,11 @@ TOKEN_CACHE = {"access_token": None, "expires_at": 0}
 AVAILABLE_CACHE = {"data": None, "expires_at": 0}
 
 USER_RESULTS = {}
-AUTO_CACHE = {}
 DETAIL_CACHE = {}
 BUSCAS_ATIVAS = set()
 UPDATES_PROCESSADOS = set()
 
 PAGE_SIZE = 8
-
 CNJ_REGEX = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
 
 UF_TRIBUNAIS = {
@@ -66,10 +64,9 @@ def get_codilo_token():
         headers={"Content-Type": "application/json"},
         timeout=30
     )
-
     response.raise_for_status()
-    data = response.json()
 
+    data = response.json()
     token = data.get("access_token")
     expires_in = int(float(data.get("expires_in", 3600)))
 
@@ -101,8 +98,8 @@ def get_available():
         headers=codilo_headers(),
         timeout=30
     )
-
     response.raise_for_status()
+
     data = response.json().get("data", [])
 
     AVAILABLE_CACHE["data"] = data
@@ -238,6 +235,62 @@ def extrair_pessoas(processo):
     }
 
 
+def extrair_lista_processos(resultado):
+    if not isinstance(resultado, dict):
+        return []
+
+    data = resultado.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for chave in [
+            "result",
+            "results",
+            "items",
+            "processes",
+            "processos",
+            "lawsuits",
+            "records",
+            "lawsuit",
+            "process",
+            "data"
+        ]:
+            valor = data.get(chave)
+
+            if isinstance(valor, list):
+                return valor
+
+            if isinstance(valor, dict):
+                return [valor]
+
+        if data.get("cover") or data.get("properties") or data.get("people") or data.get("steps"):
+            return [data]
+
+    for chave in [
+        "result",
+        "results",
+        "items",
+        "processes",
+        "processos",
+        "lawsuits",
+        "records"
+    ]:
+        valor = resultado.get(chave)
+
+        if isinstance(valor, list):
+            return valor
+
+        if isinstance(valor, dict):
+            return [valor]
+
+    if resultado.get("cover") or resultado.get("properties") or resultado.get("people") or resultado.get("steps"):
+        return [resultado]
+
+    return []
+
+
 def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=None):
     props = processo.get("properties") or {}
 
@@ -249,6 +302,7 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
         or props.get("number")
         or props.get("numero")
         or props.get("numeroProcesso")
+        or get_cover_value(processo, "Processo")
         or "Não informado"
     )
 
@@ -312,30 +366,23 @@ def formatar_processo(processo, fallback_tribunal="Não informado", cnj_forcado=
     )
 
 
-def extrair_lista_processos(resultado):
-    data = resultado.get("data", [])
+def formatar_capa_minima(cnj, tribunal="Não informado"):
+    ano = extrair_ano_cnj(cnj)
 
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict):
-        for chave in [
-            "items",
-            "processes",
-            "processos",
-            "result",
-            "results",
-            "lawsuits",
-            "records",
-            "lawsuit",
-            "process"
-        ]:
-            if isinstance(data.get(chave), list):
-                return data.get(chave)
-
-        return [data]
-
-    return []
+    return (
+        f"Prezado Cliente!\n\n"
+        f"Autor: Não retornado pela API\n\n"
+        f"CPF: Não informado\n\n"
+        f"Réu: Não retornado pela API\n\n"
+        f"Classe: Não retornado pela API\n\n"
+        f"Assunto: Não retornado pela API\n\n"
+        f"Tribunal: {tribunal}\n\n"
+        f"Nº do processo: {cnj}\n\n"
+        f"Ano do processo: {ano}\n\n"
+        f"Valor da causa: Não retornado pela API\n\n"
+        f"Advogado: Não retornado pela API\n\n"
+        f"⚠️ A Codilo confirmou/retornou o CNJ, mas não entregou a capa completa neste retorno."
+    )
 
 
 def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
@@ -468,7 +515,7 @@ def find_queries_por_tribunal(param_keys, tribunal):
             vistos.add(chave)
             unicas.append(c)
 
-    return unicas[:3]
+    return unicas[:2]
 
 
 def create_request(item, value):
@@ -530,14 +577,11 @@ def get_status_request(resultado):
     return str(status).lower()
 
 
-def get_request_result(request_id):
+def get_request_result(request_id, max_tentativas=8, tempo_espera=10):
     url = f"{REQUEST_URL}/{request_id}"
     ultimo_json = {}
 
-    MAX_TENTATIVAS = 40
-    TEMPO_ESPERA = 30
-
-    for tentativa in range(MAX_TENTATIVAS):
+    for tentativa in range(max_tentativas):
         try:
             response = requests.get(
                 url,
@@ -554,14 +598,22 @@ def get_request_result(request_id):
 
             print("\n==============================")
             print("GET REQUEST ID:", request_id)
-            print("Tentativa:", tentativa + 1, "/", MAX_TENTATIVAS)
+            print("Tentativa:", tentativa + 1, "/", max_tentativas)
             print("STATUS CODE:", response.status_code)
             print("==============================")
             print(json.dumps(resultado, indent=2, ensure_ascii=False)[:50000])
             print("==============================\n")
 
             status = get_status_request(resultado)
+            processos = extrair_lista_processos(resultado)
             cnjs = achar_cnjs_no_objeto(resultado)
+
+            if processos and status != "pending":
+                return {
+                    "success": True,
+                    "fallback_cnjs": cnjs,
+                    "raw": resultado
+                }
 
             if cnjs and status != "pending":
                 return {
@@ -570,54 +622,32 @@ def get_request_result(request_id):
                     "raw": resultado
                 }
 
-            if status in [
-                "pending",
-                "processing",
-                "running",
-                "waiting",
-                "created"
-            ]:
-                print(
-                    f"[{tentativa + 1}/{MAX_TENTATIVAS}] "
-                    f"Ainda pendente. Aguardando {TEMPO_ESPERA}s..."
-                )
-                time.sleep(TEMPO_ESPERA)
-                continue
-
-            if status in [
-                "success",
-                "completed",
-                "finished",
-                "done",
-                "warning"
-            ]:
+            if status in ["success", "completed", "finished", "done", "warning"]:
                 return {
                     "success": True,
-                    "fallback_cnjs": achar_cnjs_no_objeto(resultado),
+                    "fallback_cnjs": cnjs,
                     "raw": resultado
                 }
 
             if status in ["error", "failed", "failure"]:
                 return resultado
 
-            time.sleep(TEMPO_ESPERA)
+            if status in ["pending", "processing", "running", "waiting", "created"]:
+                time.sleep(tempo_espera)
+                continue
+
+            time.sleep(tempo_espera)
 
         except Exception as e:
             print("ERRO get_request_result:", str(e))
-            time.sleep(TEMPO_ESPERA)
+            time.sleep(tempo_esperA if False else tempo_espera)
 
     cnjs = achar_cnjs_no_objeto(ultimo_json)
 
-    if cnjs:
-        return {
-            "success": True,
-            "fallback_cnjs": cnjs,
-            "raw": ultimo_json
-        }
-
     return {
-        "success": False,
-        "data": []
+        "success": bool(cnjs),
+        "fallback_cnjs": cnjs,
+        "raw": ultimo_json
     }
 
 
@@ -677,7 +707,7 @@ def buscar_cnjs(valor, tipo):
     for item in consultas:
         try:
             request_id = create_request(item, valor)
-            resultado = get_request_result(request_id)
+            resultado = get_request_result(request_id, max_tentativas=12, tempo_espera=10)
 
             cnjs = resultado.get("fallback_cnjs", []) if isinstance(resultado, dict) else []
 
@@ -713,8 +743,19 @@ def buscar_detalhe_direto_por_tribunal(cnj, tribunal):
     for item in consultas:
         try:
             request_id = create_request(item, cnj)
-            resultado = get_request_result(request_id)
-            processos = extrair_lista_processos(resultado)
+
+            resultado = get_request_result(
+                request_id,
+                max_tentativas=6,
+                tempo_espera=8
+            )
+
+            raw = resultado.get("raw", resultado) if isinstance(resultado, dict) else resultado
+            processos = extrair_lista_processos(raw)
+
+            print("\n=========== PROCESSOS EXTRAÍDOS DETALHE DIRETO ===========")
+            print(json.dumps(processos, indent=2, ensure_ascii=False)[:50000])
+            print("=========== FIM PROCESSOS EXTRAÍDOS ===========\n")
 
             for processo in processos:
                 if not isinstance(processo, dict):
@@ -739,68 +780,7 @@ def buscar_detalhe_direto_por_tribunal(cnj, tribunal):
     return None
 
 
-def criar_autorequest(cnj):
-    payload = {
-        "key": "cnj",
-        "value": cnj,
-        "makeDownload": False,
-        "callbacks": []
-    }
-
-    response = requests.post(
-        AUTOREQUEST_URL,
-        headers=codilo_headers(),
-        json=payload,
-        timeout=30
-    )
-
-    if response.status_code not in [200, 201]:
-        raise Exception(f"AutoRequest {response.status_code}: {response.text[:500]}")
-
-    data = response.json()
-
-    auto_id = (
-        data.get("data", {}).get("id")
-        or data.get("id")
-    )
-
-    if not auto_id:
-        raise Exception(f"AutoRequest sem ID: {data}")
-
-    return auto_id
-
-
-def consultar_autorequest(auto_id):
-    url = f"{AUTOREQUEST_URL}/{auto_id}"
-    requests_list = []
-
-    for _ in range(40):
-        response = requests.get(
-            url,
-            headers=codilo_headers(),
-            timeout=30
-        )
-
-        if response.status_code not in [200, 201]:
-            raise Exception(f"Show AutoRequest {response.status_code}: {response.text[:500]}")
-
-        data = response.json()
-        requests_list = data.get("data", {}).get("requests", [])
-
-        success_requests = [
-            r for r in requests_list
-            if str(r.get("status", "")).lower() in ["success", "warning", "completed", "done"]
-        ]
-
-        if success_requests:
-            return success_requests, requests_list
-
-        time.sleep(30)
-
-    return [], requests_list
-
-
-def buscar_detalhes_autorequest(cnj, tribunal=None):
+def buscar_detalhes_rapido(cnj, tribunal=None):
     cache_key = f"{cnj}:{tribunal or ''}"
 
     if cache_key in DETAIL_CACHE:
@@ -812,80 +792,9 @@ def buscar_detalhes_autorequest(cnj, tribunal=None):
         DETAIL_CACHE[cache_key] = direto
         return direto
 
-    if cnj in AUTO_CACHE:
-        auto_id = AUTO_CACHE[cnj]["auto_id"]
-    else:
-        auto_id = criar_autorequest(cnj)
-        AUTO_CACHE[cnj] = {
-            "auto_id": auto_id,
-            "created_at": time.time()
-        }
-
-    success_requests, all_requests = consultar_autorequest(auto_id)
-
-    ultimo_erro = None
-
-    for req in success_requests:
-        request_id = req.get("id")
-        tribunal_req = req.get("court") or req.get("search") or tribunal or "Não informado"
-
-        if not request_id:
-            continue
-
-        try:
-            resultado = get_request_result(request_id)
-            processos = extrair_lista_processos(resultado)
-
-            for processo in processos:
-                if not isinstance(processo, dict):
-                    continue
-
-                cover = processo.get("cover", [])
-                props = processo.get("properties", {})
-                people = processo.get("people", [])
-                steps = processo.get("steps", [])
-
-                if cover or props or people or steps:
-                    resposta = formatar_processo(
-                        processo,
-                        fallback_tribunal=tribunal_req,
-                        cnj_forcado=cnj
-                    )
-
-                    DETAIL_CACHE[cache_key] = resposta
-                    return resposta
-
-            ultimo_erro = "Requisição success, mas veio sem properties, people, cover e steps."
-
-        except Exception as e:
-            ultimo_erro = str(e)
-            continue
-
-    if all_requests:
-        resumo = []
-        for r in all_requests[:8]:
-            resumo.append(
-                f"{r.get('court') or r.get('search') or '?'}: {r.get('status') or '?'}"
-            )
-
-        return {
-            "pending": True,
-            "cnj": cnj,
-            "tribunal": tribunal or "",
-            "texto": (
-                f"⏳ Ainda não consegui montar a capa completa.\n\n"
-                f"Nº do processo:\n{cnj}\n\n"
-                f"AutoRequest ID:\n{auto_id}\n\n"
-                f"Status interno:\n" + "\n".join(resumo)
-            )
-        }
-
-    return (
-        f"❌ Consulta finalizada, mas não retornou dados úteis.\n\n"
-        f"Nº do processo: {cnj}\n"
-        f"AutoRequest ID: {auto_id}\n"
-        f"Erro: {ultimo_erro or 'Não informado'}"
-    )
+    resposta_minima = formatar_capa_minima(cnj, tribunal or "Não informado")
+    DETAIL_CACHE[cache_key] = resposta_minima
+    return resposta_minima
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -917,7 +826,7 @@ async def executar_busca_com_botoes(update: Update, context: ContextTypes.DEFAUL
 
     msg = await update.message.reply_text(
         "🔎 Consulta iniciada.\n\n"
-        "Estou aguardando retorno da Codilo. TJRS/TJSC/TRF4 podem demorar bastante."
+        "Estou buscando processos e separando por ano."
     )
 
     try:
@@ -1052,28 +961,11 @@ async def callback_detalhe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tribunal = partes[2] if len(partes) > 2 else ""
 
     await query.edit_message_text(
-        f"🔎 Consultando detalhes do processo:\n{cnj}\n\nAguarde..."
+        f"🔎 Consultando capa do processo:\n{cnj}\n\nAguarde..."
     )
 
     try:
-        resposta = await asyncio.to_thread(buscar_detalhes_autorequest, cnj, tribunal)
-
-        if isinstance(resposta, dict) and resposta.get("pending"):
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔄 Tentar novamente",
-                        callback_data=f"detalhe:{cnj}:{tribunal}"
-                    )
-                ]
-            ]
-
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=resposta["texto"][:4000],
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return
+        resposta = await asyncio.to_thread(buscar_detalhes_rapido, cnj, tribunal)
 
         await context.bot.send_message(
             chat_id=query.message.chat_id,
