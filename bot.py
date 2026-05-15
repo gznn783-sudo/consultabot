@@ -534,7 +534,10 @@ def get_request_result(request_id):
     url = f"{REQUEST_URL}/{request_id}"
     ultimo_json = {}
 
-    for tentativa in range(20):
+    MAX_TENTATIVAS = 40
+    TEMPO_ESPERA = 30
+
+    for tentativa in range(MAX_TENTATIVAS):
         try:
             response = requests.get(
                 url,
@@ -551,6 +554,7 @@ def get_request_result(request_id):
 
             print("\n==============================")
             print("GET REQUEST ID:", request_id)
+            print("Tentativa:", tentativa + 1, "/", MAX_TENTATIVAS)
             print("STATUS CODE:", response.status_code)
             print("==============================")
             print(json.dumps(resultado, indent=2, ensure_ascii=False)[:50000])
@@ -566,11 +570,27 @@ def get_request_result(request_id):
                     "raw": resultado
                 }
 
-            if status in ["pending", "processing", "running", "waiting", "created"]:
-                time.sleep(15)
+            if status in [
+                "pending",
+                "processing",
+                "running",
+                "waiting",
+                "created"
+            ]:
+                print(
+                    f"[{tentativa + 1}/{MAX_TENTATIVAS}] "
+                    f"Ainda pendente. Aguardando {TEMPO_ESPERA}s..."
+                )
+                time.sleep(TEMPO_ESPERA)
                 continue
 
-            if status in ["success", "completed", "finished", "done", "warning"]:
+            if status in [
+                "success",
+                "completed",
+                "finished",
+                "done",
+                "warning"
+            ]:
                 return {
                     "success": True,
                     "fallback_cnjs": achar_cnjs_no_objeto(resultado),
@@ -580,11 +600,11 @@ def get_request_result(request_id):
             if status in ["error", "failed", "failure"]:
                 return resultado
 
-            time.sleep(15)
+            time.sleep(TEMPO_ESPERA)
 
         except Exception as e:
             print("ERRO get_request_result:", str(e))
-            time.sleep(15)
+            time.sleep(TEMPO_ESPERA)
 
     cnjs = achar_cnjs_no_objeto(ultimo_json)
 
@@ -754,7 +774,7 @@ def consultar_autorequest(auto_id):
     url = f"{AUTOREQUEST_URL}/{auto_id}"
     requests_list = []
 
-    for _ in range(20):
+    for _ in range(40):
         response = requests.get(
             url,
             headers=codilo_headers(),
@@ -775,7 +795,7 @@ def consultar_autorequest(auto_id):
         if success_requests:
             return success_requests, requests_list
 
-        time.sleep(15)
+        time.sleep(30)
 
     return [], requests_list
 
@@ -895,7 +915,10 @@ async def executar_busca_com_botoes(update: Update, context: ContextTypes.DEFAUL
 
     BUSCAS_ATIVAS.add(user_id)
 
-    msg = await update.message.reply_text("🔎 Buscando processos e separando por ano...")
+    msg = await update.message.reply_text(
+        "🔎 Consulta iniciada.\n\n"
+        "Estou aguardando retorno da Codilo. TJRS/TJSC/TRF4 podem demorar bastante."
+    )
 
     try:
         processos_por_ano, uf, erros = await asyncio.to_thread(buscar_cnjs, valor, tipo)
