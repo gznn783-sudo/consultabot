@@ -284,8 +284,9 @@ def create_request(item, value):
 def get_request_result(request_id):
     url = f"{REQUEST_URL}/{request_id}"
 
-    for tentativa in range(15):
-        ultimo_texto = ""
+    ultimo_json = {}
+
+    for tentativa in range(40):
 
         try:
             response = requests.get(
@@ -294,8 +295,6 @@ def get_request_result(request_id):
                 timeout=60
             )
 
-            ultimo_texto = response.text
-
             print("\n==============================")
             print("STATUS CODE:", response.status_code)
             print("==============================")
@@ -303,8 +302,9 @@ def get_request_result(request_id):
             try:
                 resultado = response.json()
             except Exception:
-                print(response.text)
                 resultado = {}
+
+            ultimo_json = resultado
 
             print("\n=========== JSON BRUTO ===========")
             print(
@@ -316,35 +316,6 @@ def get_request_result(request_id):
             )
             print("\n=========== FIM JSON ===========\n")
 
-            if not resultado:
-                time.sleep(2)
-                continue
-
-            success = resultado.get("success")
-
-            if success is True:
-                return resultado
-
-            data = resultado.get("data", {})
-
-            status = (
-                data.get("status")
-                or resultado.get("status")
-                or ""
-            )
-
-            status = str(status).lower()
-
-            if status in [
-                "pending",
-                "processing",
-                "running",
-                "waiting"
-            ]:
-                print(f"⏳ Ainda processando... tentativa {tentativa + 1}")
-                time.sleep(2)
-                continue
-
             cnjs = achar_cnjs_no_objeto(resultado)
 
             if cnjs:
@@ -354,21 +325,64 @@ def get_request_result(request_id):
                     "raw": resultado
                 }
 
-            time.sleep(2)
+            requested = resultado.get("requested", {})
 
-        except Exception as e:
-            print("ERRO get_request_result:", str(e))
+            status = (
+                requested.get("status")
+                or resultado.get("status")
+                or ""
+            )
 
-            cnjs = achar_cnjs_no_objeto(ultimo_texto)
+            status = str(status).lower()
 
-            if cnjs:
+            print(f"STATUS ATUAL: {status}")
+
+            if status in [
+                "pending",
+                "processing",
+                "running",
+                "waiting",
+                "created"
+            ]:
+                print(f"⏳ Aguardando processamento... tentativa {tentativa + 1}")
+                time.sleep(5)
+                continue
+
+            if status in [
+                "success",
+                "completed",
+                "finished",
+                "done"
+            ]:
+                cnjs = achar_cnjs_no_objeto(resultado)
+
                 return {
                     "success": True,
                     "fallback_cnjs": cnjs,
-                    "raw_text": ultimo_texto
+                    "raw": resultado
                 }
 
-            time.sleep(2)
+            if status in [
+                "error",
+                "failed",
+                "failure"
+            ]:
+                return resultado
+
+            time.sleep(5)
+
+        except Exception as e:
+            print("ERRO:", str(e))
+            time.sleep(5)
+
+    cnjs = achar_cnjs_no_objeto(ultimo_json)
+
+    if cnjs:
+        return {
+            "success": True,
+            "fallback_cnjs": cnjs,
+            "raw": ultimo_json
+        }
 
     return {
         "success": False,
