@@ -22,6 +22,7 @@ MAX_CODILO_REQUESTS = int(os.getenv("MAX_CODILO_REQUESTS", "50"))
 CODILO_MAX_POLL_ATTEMPTS = int(os.getenv("CODILO_MAX_POLL_ATTEMPTS", "5"))
 CODILO_POLL_SLEEP = float(os.getenv("CODILO_POLL_SLEEP", "2"))
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "15"))
+CODILO_REQUEST_FORMAT = os.getenv("CODILO_REQUEST_FORMAT", "allRequests")
 
 AUTH_URL = "https://auth.codilo.com.br/oauth/token"
 AVAILABLE_URL = "https://api.consulta.codilo.com.br/v1/available"
@@ -232,7 +233,88 @@ def get_available():
     return data
 
 
-def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
+def extrair_queries_disponiveis(available_data, param_keys):
+    """
+    Extrai as rotas EXATAMENTE do GET /v1/available, seguindo a documentação:
+    data[] -> platforms[] -> searches[] -> queries[] -> params[].tag
+
+    Isso evita chute de rota fixa e garante que o bot só crie consulta onde a
+    própria Codilo informou que aquele parâmetro existe, por exemplo tag=oab.
+    """
+    param_keys = {str(k).lower() for k in param_keys}
+    saida = []
+
+    if isinstance(available_data, dict):
+        available_data = available_data.get("data", [])
+
+    if not isinstance(available_data, list):
+        return []
+
+    for source_item in available_data:
+        if not isinstance(source_item, dict):
+            continue
+
+        source = source_item.get("source") or "courts"
+        if source != "courts":
+            continue
+
+        platforms = source_item.get("platforms") or []
+        if not isinstance(platforms, list):
+            continue
+
+        for platform_item in platforms:
+            if not isinstance(platform_item, dict):
+                continue
+
+            platform = platform_item.get("platform")
+            searches = platform_item.get("searches") or []
+
+            if not platform or not isinstance(searches, list):
+                continue
+
+            for search_item in searches:
+                if not isinstance(search_item, dict):
+                    continue
+
+                search = search_item.get("search")
+                queries = search_item.get("queries") or []
+
+                if not search or not isinstance(queries, list):
+                    continue
+
+                for query_item in queries:
+                    if not isinstance(query_item, dict):
+                        continue
+
+                    query = query_item.get("query")
+                    params = query_item.get("params") or []
+
+                    if not query or not isinstance(params, list):
+                        continue
+
+                    for param in params:
+                        if not isinstance(param, dict):
+                            continue
+
+                        tag = str(param.get("tag") or "").lower()
+
+                        if tag in param_keys:
+                            saida.append({
+                                "source": source,
+                                "platform": platform,
+                                "search": search,
+                                "query": query,
+                                "param_key": tag,
+                                "label": param.get("label"),
+                                "mask": param.get("mask"),
+                                "required": param.get("required"),
+                            })
+
+    return saida
+
+
+def extrair_queries_disponiveis_recursivo(node, param_keys, ctx=None, saida=None):
+    """Fallback antigo para algum formato inesperado do /available."""
     if ctx is None:
         ctx = {"source": "courts", "platform": None, "search": None, "query": None}
 
@@ -241,7 +323,7 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
 
     if isinstance(node, list):
         for item in node:
-            extrair_queries_disponiveis(item, param_keys, ctx.copy(), saida)
+            extrair_queries_disponiveis_recursivo(item, param_keys, ctx.copy(), saida)
         return saida
 
     if not isinstance(node, dict):
@@ -263,33 +345,25 @@ def extrair_queries_disponiveis(node, param_keys, ctx=None, saida=None):
             if not isinstance(param, dict):
                 continue
 
-            key = (
-                param.get("tag")
-                or param.get("key")
-                or param.get("name")
-                or param.get("param")
-            )
+            key = str(param.get("tag") or param.get("key") or param.get("name") or param.get("param") or "").lower()
 
-            if key in param_keys:
-                saida.append(
-                    {
-                        "source": novo_ctx.get("source") or "courts",
-                        "platform": novo_ctx["platform"],
-                        "search": novo_ctx["search"],
-                        "query": novo_ctx["query"],
-                        "param_key": key,
-                    }
-                )
+            if key in {str(k).lower() for k in param_keys}:
+                saida.append({
+                    "source": novo_ctx.get("source") or "courts",
+                    "platform": novo_ctx["platform"],
+                    "search": novo_ctx["search"],
+                    "query": novo_ctx["query"],
+                    "param_key": key,
+                })
 
     for key, value in node.items():
         if key in ["params", "parameters"]:
             continue
 
         if isinstance(value, (dict, list)):
-            extrair_queries_disponiveis(value, param_keys, novo_ctx.copy(), saida)
+            extrair_queries_disponiveis_recursivo(value, param_keys, novo_ctx.copy(), saida)
 
     return saida
-
 
 def normalizar_codigo_tribunal(valor):
     return re.sub(r"[^a-z0-9]", "", str(valor or "").lower())
@@ -394,19 +468,29 @@ def find_queries(param_keys, uf=None):
     available = get_available()
     consultas = extrair_queries_disponiveis(available, param_keys)
 
+    # Segurança: se a Codilo mudar o formato do /available, usa parser recursivo.
+    if not consultas:
+        consultas = extrair_queries_disponiveis_recursivo(available, param_keys)
+
     unicas = []
     vistos = set()
 
     for c in consultas:
         chave = (c["source"], c["platform"], c["search"], c["query"], c["param_key"])
-
         if chave not in vistos:
             vistos.add(chave)
             unicas.append(c)
 
-    unicas = ordenar_por_uf(unicas, uf)
-    return limitar_consultas_com_prioridade(unicas, uf)
+    # Para OAB com UF detectada, não deixa a busca sair varrendo tribunais de outros estados.
+    # Usa somente as rotas que o /available disse existir e que pertencem à UF priorizada.
+    if uf:
+        prioridade = UF_TRIBUNAIS.get(str(uf).upper(), [])
+        filtradas = [c for c in unicas if tribunal_bate(c.get("search"), prioridade)]
+        if filtradas:
+            unicas = filtradas
 
+    unicas = sorted(unicas, key=lambda c: score_consulta_por_uf(c, uf))
+    return limitar_consultas_com_prioridade(unicas, uf)
 
 def find_queries_por_tribunal(param_keys, tribunal):
     available = get_available()
@@ -448,6 +532,7 @@ def create_request(item, value):
             "value": value,
         },
         "callbacks": [],
+        "format": CODILO_REQUEST_FORMAT,
     }
 
     response = requests.post(
@@ -496,7 +581,7 @@ def get_status_request(resultado):
     return str(status).lower()
 
 
-def get_request_result(request_id, max_tentativas=12, tempo_espera=10):
+def get_request_result(request_id, max_tentativas=CODILO_MAX_POLL_ATTEMPTS, tempo_espera=CODILO_POLL_SLEEP):
     url = f"{REQUEST_URL}/{request_id}"
     ultimo_json = {}
 
@@ -904,7 +989,7 @@ def buscar_cnjs(valor, tipo):
 
         try:
             request_id = create_request(item, valor)
-            resultado = get_request_result(request_id, max_tentativas=12, tempo_espera=10)
+            resultado = get_request_result(request_id, max_tentativas=CODILO_MAX_POLL_ATTEMPTS, tempo_espera=CODILO_POLL_SLEEP)
 
             raw = resultado.get("raw", resultado) if isinstance(resultado, dict) else resultado
             cnjs = resultado.get("fallback_cnjs", []) if isinstance(resultado, dict) else []
@@ -948,7 +1033,7 @@ def buscar_detalhe_direto_por_tribunal(cnj, tribunal):
     for item in consultas:
         try:
             request_id = create_request(item, cnj)
-            resultado = get_request_result(request_id, max_tentativas=8, tempo_espera=8)
+            resultado = get_request_result(request_id, max_tentativas=CODILO_MAX_POLL_ATTEMPTS, tempo_espera=CODILO_POLL_SLEEP)
 
             raw = resultado.get("raw", resultado) if isinstance(resultado, dict) else resultado
             processos = extrair_lista_processos(raw)
@@ -1085,7 +1170,7 @@ def buscar_detalhes_rapido(cnj, tribunal=None):
             if not req_id:
                 continue
 
-            resultado = get_request_result(req_id, max_tentativas=8, tempo_espera=8)
+            resultado = get_request_result(req_id, max_tentativas=CODILO_MAX_POLL_ATTEMPTS, tempo_espera=CODILO_POLL_SLEEP)
             raw = resultado.get("raw", resultado) if isinstance(resultado, dict) else resultado
             processos = extrair_lista_processos(raw)
 
