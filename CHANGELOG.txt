@@ -8,3 +8,6 @@ VERSÃO REFLOW
 - Usa cobertura transparente ao remover texto, preservando o fundo do modelo.
 - Amplia automaticamente blocos curtos até a área útil quando possível.
 - Compatível com Telegram, GitHub e Render via webhook.
+
+- WEBHOOK_URL agora usa automaticamente RENDER_EXTERNAL_URL no Render.
+- BOT_TOKEN aceita TELEGRAM_TOKEN como nome alternativo para instalações antigas.

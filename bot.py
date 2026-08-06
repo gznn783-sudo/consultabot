@@ -20,15 +20,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
+# Compatível com o nome atual e com instalações antigas.
+BOT_TOKEN = (
+    os.getenv("BOT_TOKEN")
+    or os.getenv("TELEGRAM_TOKEN")
+    or ""
+).strip()
+
+# No Render, RENDER_EXTERNAL_URL já é fornecida automaticamente.
+# WEBHOOK_URL continua disponível para URL personalizada ou execução fora do Render.
+WEBHOOK_URL = (
+    os.getenv("WEBHOOK_URL")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or ""
+).strip().rstrip("/")
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 TEMPLATE_DIR = DATA_DIR / "templates"
 OUTPUT_DIR = DATA_DIR / "outputs"
 MAX_TEMPLATE_MB = int(os.getenv("MAX_TEMPLATE_MB", "20"))
 
 if not BOT_TOKEN:
-    raise RuntimeError("Defina BOT_TOKEN nas variáveis de ambiente do Render.")
+    raise RuntimeError("Defina BOT_TOKEN (ou TELEGRAM_TOKEN) nas variáveis de ambiente.")
 
 TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -258,7 +270,7 @@ async def startup() -> None:
         )
         logger.info("Webhook configurado: %s/webhook", WEBHOOK_URL)
     else:
-        logger.warning("WEBHOOK_URL não definido; o Render responderá, mas o Telegram não enviará atualizações.")
+        logger.warning("Nenhuma URL pública encontrada. Defina WEBHOOK_URL fora do Render; no Render, confirme que o serviço é do tipo Web Service.")
 
 
 @app.on_event("shutdown")

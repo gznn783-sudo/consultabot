@@ -97,11 +97,18 @@ Crie um **Web Service** conectado ao repositório.
 - Build Command: `pip install -r requirements.txt`
 - Start Command: `./start.sh`
 
-Cadastre as variáveis:
+Cadastre a variável obrigatória:
 
 ```text
 BOT_TOKEN=token_fornecido_pelo_BotFather
-WEBHOOK_URL=https://nome-do-servico.onrender.com
+```
+
+O código também aceita `TELEGRAM_TOKEN` para manter compatibilidade com instalações antigas.
+
+No Render, não é necessário cadastrar `WEBHOOK_URL`: o bot usa automaticamente a variável `RENDER_EXTERNAL_URL` fornecida pelo próprio Web Service. Para usar domínio personalizado ou executar fora do Render, cadastre:
+
+```text
+WEBHOOK_URL=https://seu-dominio.example
 DATA_DIR=data
 ```
 
