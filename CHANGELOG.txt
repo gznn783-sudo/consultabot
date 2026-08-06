@@ -1,13 +1,9 @@
-VERSÃO REFLOW
+Versão com data e nome automático do arquivo
 
-- Substitui o bloco completo, não escreve texto novo sobre texto antigo.
-- Recalcula as quebras de linha de parágrafos com marcadores no meio.
-- Mantém quebras estruturais de listas como Autor, CPF, Assunto e Banco.
-- Aceita {{campo}} e também {{campo|largura|altura}}.
-- Não adiciona rodapé, marca-d'água ou aviso.
-- Usa cobertura transparente ao remover texto, preservando o fundo do modelo.
-- Amplia automaticamente blocos curtos até a área útil quando possível.
-- Compatível com Telegram, GitHub e Render via webhook.
-
-- WEBHOOK_URL agora usa automaticamente RENDER_EXTERNAL_URL no Render.
-- BOT_TOKEN aceita TELEGRAM_TOKEN como nome alternativo para instalações antigas.
+- Adicionado suporte documentado ao marcador {{data}}.
+- Aceita os rótulos "data", "data do documento", "data da decisão" e "dia".
+- O PDF agora é nomeado como AUTOR_NUMERODOPROCESSO.pdf.
+- O autor é convertido para maiúsculas, sem acentos e com espaços em underscores.
+- O número do processo é gravado somente com dígitos.
+- Exemplo: GILMAR_BERTON_50014660320264047107.pdf.
+- Mantidos webhook automático do Render, reflow dos blocos e compatibilidade com BOT_TOKEN/TELEGRAM_TOKEN.

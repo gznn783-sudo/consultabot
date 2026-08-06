@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -66,6 +67,10 @@ ALIASES = {
     "agência": "agencia",
     "advogado responsável": "advogado",
     "advogado responsavel": "advogado",
+    "data do documento": "data",
+    "data da decisão": "data",
+    "data da decisao": "data",
+    "dia": "data",
 }
 
 
@@ -101,10 +106,23 @@ def template_path(user_id: int) -> Path:
     return TEMPLATE_DIR / f"{user_id}.pdf"
 
 
-def safe_filename(value: str) -> str:
-    value = re.sub(r"[^0-9A-Za-zÀ-ÿ _.-]", "", value).strip()
-    value = re.sub(r"\s+", "_", value)
-    return (value[:70] or "documento") + ".pdf"
+def filename_component(value: str, *, fallback: str = "DOCUMENTO") -> str:
+    """Converte um valor em parte segura do nome do arquivo."""
+    normalized = unicodedata.normalize("NFKD", str(value))
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_value = re.sub(r"[^0-9A-Za-z]+", "_", ascii_value)
+    ascii_value = re.sub(r"_+", "_", ascii_value).strip("_")
+    return (ascii_value.upper() or fallback)[:100]
+
+
+def build_output_filename(data: dict[str, str]) -> str:
+    """Gera AUTOR_NUMERODOPROCESSO.pdf, sem pontuação no processo."""
+    author = filename_component(data.get("autor") or data.get("nome") or "DOCUMENTO")
+    process_digits = re.sub(r"\D", "", data.get("processo", ""))
+
+    if process_digits:
+        return f"{author}_{process_digits}.pdf"
+    return f"{author}.pdf"
 
 
 def fields_message(fields: list[str]) -> str:
@@ -129,7 +147,7 @@ async def modelo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["awaiting_template"] = True
     await update.message.reply_text(
         "Envie agora o PDF exportado do Canva.\n\n"
-        "Use {{autor}}, {{processo}} e {{assunto}}. O formato antigo {{autor|95|8}} também funciona."
+        "Use {{data}}, {{autor}}, {{processo}} e {{assunto}}. O formato antigo {{autor|95|8}} também funciona."
     )
 
 
@@ -226,7 +244,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     await update.message.reply_text("Preenchendo os blocos e recalculando as linhas...")
-    output_name = safe_filename(data.get("autor") or data.get("nome") or "documento_preenchido")
+    output_name = build_output_filename(data)
 
     try:
         with tempfile.TemporaryDirectory(dir=OUTPUT_DIR) as temp_dir:

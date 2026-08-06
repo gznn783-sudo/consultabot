@@ -11,6 +11,7 @@ O projeto não adiciona rodapé, cabeçalho, marca-d'água ou aviso.
 O formato recomendado é simples:
 
 ```text
+{{data}}
 {{autor}}
 {{cpf}}
 {{processo}}
@@ -36,6 +37,18 @@ O formato que você já colocou também é aceito:
 
 Os números são ignorados nesta versão, porque a substituição ocorre no bloco completo.
 
+Para tornar a data variável, troque a linha fixa no Canva por:
+
+```text
+{{data}}
+```
+
+E envie ao bot, por exemplo:
+
+```text
+data: Sexta - Feira 24 de Julho de 2026
+```
+
 Os marcadores podem ficar no meio do texto corrido:
 
 ```text
@@ -56,6 +69,7 @@ Exporte como **PDF padrão** e não use a opção de achatar PDF.
 ## Dados enviados ao bot
 
 ```text
+data: Sexta - Feira 24 de Julho de 2026
 autor: Jozi Biasibetti Witzorecki
 cpf: 098.873.888-00
 processo: 5033680-68.2026.4.04.7100
@@ -72,6 +86,20 @@ conta: 00937377
 ```
 
 Uma linha sem `:` continua o campo anterior. Isso permite quebrar um assunto longo em várias linhas na mensagem do Telegram.
+
+## Nome do PDF gerado
+
+O arquivo é enviado no formato:
+
+```text
+AUTOR_NUMERODOPROCESSO.pdf
+```
+
+O nome do autor é convertido para maiúsculas e sem acentos, e o processo fica somente com números. Exemplo:
+
+```text
+GILMAR_BERTON_50014660320264047107.pdf
+```
 
 ## Publicar no GitHub
 
