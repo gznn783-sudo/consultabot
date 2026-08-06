@@ -1,0 +1,10 @@
+VERSÃO REFLOW
+
+- Substitui o bloco completo, não escreve texto novo sobre texto antigo.
+- Recalcula as quebras de linha de parágrafos com marcadores no meio.
+- Mantém quebras estruturais de listas como Autor, CPF, Assunto e Banco.
+- Aceita {{campo}} e também {{campo|largura|altura}}.
+- Não adiciona rodapé, marca-d'água ou aviso.
+- Usa cobertura transparente ao remover texto, preservando o fundo do modelo.
+- Amplia automaticamente blocos curtos até a área útil quando possível.
+- Compatível com Telegram, GitHub e Render via webhook.
