@@ -56,6 +56,9 @@ ALIASES = {
     "número do processo": "processo",
     "numero do processo": "processo",
     "nome do autor": "autor",
+    "réu": "reu",
+    "requerido": "reu",
+    "parte ré": "reu",
     "comarca": "tribunal",
     "tabelião": "nome",
     "tabeliao": "nome",
@@ -147,7 +150,7 @@ async def modelo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["awaiting_template"] = True
     await update.message.reply_text(
         "Envie agora o PDF exportado do Canva.\n\n"
-        "Use {{data}}, {{autor}}, {{processo}} e {{assunto}}. O formato antigo {{autor|95|8}} também funciona."
+        "Use {{data}}, {{autor}}, {{reu}}, {{processo}} e {{assunto}}. O formato antigo {{autor|95|8}} também funciona."
     )
 
 

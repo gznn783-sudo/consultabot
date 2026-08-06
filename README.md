@@ -13,6 +13,7 @@ O formato recomendado é simples:
 ```text
 {{data}}
 {{autor}}
+{{reu}}
 {{cpf}}
 {{processo}}
 {{assunto}}
@@ -71,6 +72,7 @@ Exporte como **PDF padrão** e não use a opção de achatar PDF.
 ```text
 data: Sexta - Feira 24 de Julho de 2026
 autor: Jozi Biasibetti Witzorecki
+reu: Instituto Nacional do Seguro Social - INSS
 cpf: 098.873.888-00
 processo: 5033680-68.2026.4.04.7100
 assunto: Aposentadoria por Idade - Rural (art. 48/51), Aposentadoria por Idade (Art. 48/51), Benefícios em Espécie, DIREITO PREVIDENCIÁRIO
@@ -86,6 +88,22 @@ conta: 00937377
 ```
 
 Uma linha sem `:` continua o campo anterior. Isso permite quebrar um assunto longo em várias linhas na mensagem do Telegram.
+
+## Campo Réu
+
+No Canva, coloque o marcador no local desejado:
+
+```text
+Réu: {{reu}}
+```
+
+Ao preencher pelo Telegram, envie:
+
+```text
+reu: Instituto Nacional do Seguro Social - INSS
+```
+
+O bot também aceita os rótulos `réu`, `requerido` e `parte ré` na mensagem. O campo não altera o nome do arquivo; o arquivo continua sendo formado apenas por autor e processo.
 
 ## Nome do PDF gerado
 

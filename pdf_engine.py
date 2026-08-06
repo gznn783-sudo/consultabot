@@ -15,7 +15,7 @@ MARKER_RE = re.compile(
 )
 
 LABEL_RE = re.compile(
-    r"^\s*(autor|cpf|assunto|valor|pend[eê]ncias|custa|nome|chave|pix|banco|"
+    r"^\s*(autor|r[eé]u|requerido|parte\s+r[eé]|cpf|assunto|valor|pend[eê]ncias|custa|nome|chave|pix|banco|"
     r"ag[eê]ncia|conta|advogado|opera[cç][aã]o|n[uú]mero|tribunal)\b",
     re.IGNORECASE,
 )

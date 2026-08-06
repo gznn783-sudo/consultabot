@@ -1,3 +1,10 @@
+Versão com campo Réu
+
+- Adicionado suporte ao marcador {{reu}}.
+- Aceita os rótulos "reu", "réu", "requerido" e "parte ré" na mensagem do Telegram.
+- O campo Réu não altera o nome do PDF.
+- Mantidos todos os comportamentos anteriores, inclusive data variável e nome AUTOR_NUMERODOPROCESSO.pdf.
+
 Versão com data e nome automático do arquivo
 
 - Adicionado suporte documentado ao marcador {{data}}.
